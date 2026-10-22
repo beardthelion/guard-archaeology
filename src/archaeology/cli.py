@@ -14,7 +14,7 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass
 
-from . import extract, gitlog, seeds, track
+from . import classify, extract, gitlog, seeds, track
 
 
 class ArchaeologyError(Exception):
@@ -94,9 +94,9 @@ def track_guards(records, repo, until=None):
     return track.track_guards(repo, records, until=until)
 
 
-def classify_removals(outcomes, repo, caller_depth=2) -> list:
+def classify_removals(outcomes, repo, caller_depth=2):
     """U5: candidate removals -> five-verdict classification."""
-    return []
+    return classify.classify_all(repo, outcomes, caller_depth=caller_depth)
 
 
 def classify_counts(seed_set, records, outcomes, verdicts) -> RunCounts:
@@ -104,7 +104,7 @@ def classify_counts(seed_set, records, outcomes, verdicts) -> RunCounts:
 
     INTACT is assigned by tracking (R6) and counted from the tracking
     outcomes; the five removal verdicts come from classify's output. A
-    non-intact outcome with no verdict yet counts as unknown (U5 pending).
+    non-intact outcome with no verdict still counts as unknown.
     """
     outcomes = outcomes or ()
     verdicts = verdicts or ()
@@ -132,7 +132,7 @@ def classify_counts(seed_set, records, outcomes, verdicts) -> RunCounts:
 
 
 def build_rows(counts: RunCounts, unresolvable=(), extract_errors=(),
-               track_errors=()) -> list:
+               track_errors=(), classify_errors=()) -> list:
     """JSONL rows: the run header plus per-failure error rows.
 
     U6 extends this with candidate rows in the drain schema.
@@ -148,7 +148,7 @@ def build_rows(counts: RunCounts, unresolvable=(), extract_errors=(),
                 "reason": "unresolvable-in-window",
             }
         )
-    for e in (*extract_errors, *track_errors):
+    for e in (*extract_errors, *track_errors, *classify_errors):
         rows.append({"type": "error", **e})
     return rows
 
@@ -229,10 +229,18 @@ def run(
     records = extraction.records
     tracking = track_guards(records, real, until=until)
     outcomes = tracking.outcomes
-    verdicts = classify_removals(outcomes, real, caller_depth=caller_depth)
-    counts = classify_counts(seed_set, records, outcomes, verdicts)
+    classification = classify_removals(
+        outcomes, real, caller_depth=caller_depth
+    )
+    counts = classify_counts(
+        seed_set, records, outcomes, classification.verdicts
+    )
     rows = build_rows(
-        counts, seed_set.unresolvable, extraction.errors, tracking.errors
+        counts,
+        seed_set.unresolvable,
+        extraction.errors,
+        tracking.errors,
+        classification.errors,
     )
 
     try:
