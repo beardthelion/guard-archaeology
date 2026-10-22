@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "archaeology"
+version = "0.1.0"
+description = "Finds security guards a codebase added and later silently lost"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+archaeology = "archaeology.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/archaeology"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
