@@ -14,7 +14,7 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass
 
-from . import gitlog, seeds
+from . import extract, gitlog, seeds
 
 
 class ArchaeologyError(Exception):
@@ -84,9 +84,9 @@ def _parse_args(argv):
 # later units replace; run() already calls them in final order.
 
 
-def extract_guards(seed_set) -> list:
-    """U3: seed diffs -> guard records. Stub returns no records."""
-    return []
+def extract_guards(seed_set, repo):
+    """U3: seed diffs -> guard records (extract.Extraction)."""
+    return extract.extract_guards(repo, seed_set)
 
 
 def track_guards(records, repo, until=None) -> list:
@@ -120,7 +120,7 @@ def classify_counts(seed_set, records, verdicts) -> RunCounts:
     return counts
 
 
-def build_rows(counts: RunCounts, unresolvable=()) -> list:
+def build_rows(counts: RunCounts, unresolvable=(), extract_errors=()) -> list:
     """JSONL rows: the run header plus per-failure error rows.
 
     U6 extends this with candidate rows in the drain schema.
@@ -136,6 +136,8 @@ def build_rows(counts: RunCounts, unresolvable=()) -> list:
                 "reason": "unresolvable-in-window",
             }
         )
+    for e in extract_errors:
+        rows.append({"type": "error", **e})
     return rows
 
 
@@ -211,11 +213,12 @@ def run(
     except (seeds.SeedsError, gitlog.GitError) as e:
         raise ArchaeologyError(str(e))
 
-    records = extract_guards(seed_set)
+    extraction = extract_guards(seed_set, real)
+    records = extraction.records
     outcomes = track_guards(records, real, until=until)
     verdicts = classify_removals(outcomes, real, caller_depth=caller_depth)
     counts = classify_counts(seed_set, records, verdicts)
-    rows = build_rows(counts, seed_set.unresolvable)
+    rows = build_rows(counts, seed_set.unresolvable, extraction.errors)
 
     try:
         write_outputs(
