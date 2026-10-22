@@ -8,13 +8,11 @@ track_guards -> classify -> build_rows -> write_outputs.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
-import tempfile
 from dataclasses import asdict, dataclass
 
-from . import classify, extract, gitlog, seeds, track
+from . import classify, emit, exposure, extract, gitlog, seeds, track
 
 
 class ArchaeologyError(Exception):
@@ -131,60 +129,32 @@ def classify_counts(seed_set, records, outcomes, verdicts) -> RunCounts:
     return counts
 
 
-def build_rows(counts: RunCounts, unresolvable=(), extract_errors=(),
-               track_errors=(), classify_errors=()) -> list:
-    """JSONL rows: the run header plus per-failure error rows.
-
-    U6 extends this with candidate rows in the drain schema.
-    """
-    rows = [{"type": "run", **asdict(counts)}]
-    for u in unresolvable:
-        rows.append(
-            {
-                "type": "error",
-                "stage": "seeds",
-                "seed": u.sha,
-                "advisory_id": u.advisory_id,
-                "reason": "unresolvable-in-window",
-            }
-        )
-    for e in (*extract_errors, *track_errors, *classify_errors):
-        rows.append({"type": "error", **e})
-    return rows
+def build_rows(repo, counts: RunCounts, verdicts, unresolvable=(),
+               extract_errors=(), track_errors=(), classify_errors=(),
+               emap=None, holdout=None) -> list:
+    """JSONL rows: run header, sorted REGRESSED candidates, error rows."""
+    return emit.build_rows(
+        repo,
+        counts,
+        verdicts,
+        unresolvable=unresolvable,
+        extract_errors=extract_errors,
+        track_errors=track_errors,
+        classify_errors=classify_errors,
+        emap=emap,
+        holdout=holdout,
+    )
 
 
-def render_markdown(counts: RunCounts) -> str:
-    """U6 stub: markdown render of the same row set."""
-    lines = ["# archaeology run", ""]
-    for key, val in asdict(counts).items():
-        lines.append(f"- {key}: {val}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _atomic_write(path: str, text: str) -> None:
-    d = os.path.dirname(os.path.abspath(path))
-    os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".archaeology-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+def render_markdown(counts: RunCounts, candidates) -> str:
+    """Markdown render of the same row set: counts then per-family
+    candidate sections (R16)."""
+    return emit.render_markdown(counts, candidates)
 
 
 def write_outputs(rows: list, out_path: str, also_md: bool = False,
                   md_text: str = None) -> None:
-    text = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
-    _atomic_write(out_path, text)
-    if also_md:
-        md_path = os.path.splitext(out_path)[0] + ".md"
-        _atomic_write(md_path, md_text or "")
+    emit.write_outputs(rows, out_path, also_md=also_md, md_text=md_text)
 
 
 def summary_line(counts: RunCounts) -> str:
@@ -235,20 +205,29 @@ def run(
     counts = classify_counts(
         seed_set, records, outcomes, classification.verdicts
     )
+    emap = exposure.load_exposure(real, exposure_file=exposure_file)
+    hidx = emit.load_holdout_rows(real)
     rows = build_rows(
+        real,
         counts,
+        classification.verdicts,
         seed_set.unresolvable,
         extraction.errors,
         tracking.errors,
         classification.errors,
+        emap=emap,
+        holdout=hidx,
     )
+    candidates = [r for r in rows if r.get("type") == "candidate"]
 
     try:
         write_outputs(
             rows,
             out_path,
             also_md=also_md,
-            md_text=render_markdown(counts) if also_md else None,
+            md_text=(
+                render_markdown(counts, candidates) if also_md else None
+            ),
         )
     except OSError as e:
         raise ArchaeologyError(f"cannot write output: {e}")
