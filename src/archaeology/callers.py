@@ -48,18 +48,6 @@ class Coverage:
 # --- lexical helpers ------------------------------------------------------------
 
 
-def _call_re(name):
-    return re.compile(r"(?<![\w$.])" + re.escape(name) + r"\s*\(")
-
-
-def _word_re(name):
-    # plain word boundary: attribute mentions (mod.name, obj.name()) are
-    # word mentions too. They never count as bound call sites; only the
-    # bare name( form does. So any mention the walk cannot classify as
-    # call/decl/import is a binding it cannot establish.
-    return re.compile(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])")
-
-
 def _quoted_re(name):
     # a bare quoted token: the dynamic-reference idiom (getattr,
     # dispatch tables, globals()[...]). Multi-word strings do not match.
@@ -67,7 +55,7 @@ def _quoted_re(name):
 
 
 def _mentions(masked_text, names):
-    return any(_word_re(n).search(masked_text) for n in names)
+    return any(shapes._word_re(n).search(masked_text) for n in names)
 
 
 def _split_top(args_text):
@@ -93,7 +81,7 @@ def _call_args(masked_text, name):
     The text must be string/comment-masked so parens inside literals do
     not unbalance the scan.
     """
-    m = _call_re(name).search(masked_text)
+    m = shapes._call_re(name).search(masked_text)
     if m is None:
         return None
     i = masked_text.find("(", m.start())
@@ -168,19 +156,6 @@ def _mapped_params(args_text, params, bound_names):
     return mapped
 
 
-def _enclosing_func(funcs, i):
-    """Innermost func-kind FuncRange containing line i, or None."""
-    best = None
-    for f in funcs:
-        if (
-            f.kind == "func"
-            and f.start <= i <= f.end
-            and (best is None or f.start > best.start)
-        ):
-            best = f
-    return best
-
-
 def locate_function(funcs, qualname):
     """FuncRange for a sink qualname, AMBIGUOUS, or None.
 
@@ -205,7 +180,26 @@ def locate_function(funcs, qualname):
 # --- guard statements on a path ----------------------------------------------------
 
 
-def _family_guard(text, lang, func, family, bound_names, before_line):
+def _guarded_stmt(lines, masked, lang, i, family, bound_names,
+                  before_line):
+    """True when the statement at line i is a same-family guard that
+    completes on/before before_line and mentions a bound name (the weak
+    form, bound_names=None, counts any same-family guard in scope)."""
+    stmt, end = extract._complete_statement(lang, lines, masked, i)
+    if end > before_line:
+        return False  # spans the call: a guard must complete before it
+    cls = shapes.classify_statement(lang, stmt)
+    if cls is None or cls[1] != family:
+        return False
+    if bound_names is not None and not _mentions(
+        shapes.mask_code(stmt, lang), bound_names
+    ):
+        return False
+    return True
+
+
+def _family_guard(lines, masked, lang, func, family, bound_names,
+                  before_line):
     """Same-family guard statement in func ending on/before before_line.
 
     ``bound_names`` restricts which statements cover: the guard must
@@ -213,47 +207,30 @@ def _family_guard(text, lang, func, family, bound_names, before_line):
     KTD7). bound_names=None is the weak form, any same-family guard in
     scope counts.
     """
-    lines = text.splitlines()
-    masked = [shapes.mask_code(l, lang) for l in lines]
     end_of = min(func.end, len(lines) - 1, before_line)
     for i in range(func.start, end_of + 1):
         if not masked[i].strip():
             continue
-        stmt, end = extract._complete_statement(lang, lines, masked, i)
-        if end > before_line:
-            continue  # spans the call: a guard must complete before it
-        cls = shapes.classify_statement(lang, stmt)
-        if cls is None or cls[1] != family:
-            continue
-        if bound_names is not None and not _mentions(
-            shapes.mask_code(stmt, lang), bound_names
+        if _guarded_stmt(
+            lines, masked, lang, i, family, bound_names, before_line
         ):
-            continue
-        return True
+            return True
     return False
 
 
-def _module_guard(text, lang, funcs, family, bound_names, before_line):
+def _module_guard(lines, masked, lang, funcs, family, bound_names,
+                  before_line):
     """Same-family guard at module scope before a module-level call."""
-    lines = text.splitlines()
-    masked = [shapes.mask_code(l, lang) for l in lines]
     inside = set()
     for f in funcs:
         inside.update(range(f.start, f.end + 1))
     for i in range(0, min(before_line, len(lines) - 1) + 1):
         if i in inside or not masked[i].strip():
             continue
-        stmt, end = extract._complete_statement(lang, lines, masked, i)
-        if end > before_line:
-            continue
-        cls = shapes.classify_statement(lang, stmt)
-        if cls is None or cls[1] != family:
-            continue
-        if bound_names is not None and not _mentions(
-            shapes.mask_code(stmt, lang), bound_names
+        if _guarded_stmt(
+            lines, masked, lang, i, family, bound_names, before_line
         ):
-            continue
-        return True
+            return True
     return False
 
 
@@ -286,8 +263,8 @@ def _callee_defs(repo, sha, cpath, name):
     return defs, ambiguous
 
 
-def _callee_guard(repo, sha, cpath, text, lang, funcs, func, family,
-                  bound_names, before_line):
+def _callee_guard(repo, sha, cpath, text, lines, masked, lang, funcs,
+                  func, family, bound_names, before_line):
     """(covered, ambiguous), helper invoked before before_line.
 
     Covers the relocation where the guard moved into a shared helper the
@@ -298,16 +275,17 @@ def _callee_guard(repo, sha, cpath, text, lang, funcs, func, family,
     establish. One hop: a helper of a helper is beyond the lexical
     bound.
     """
-    lines = text.splitlines()
-    masked = [shapes.mask_code(l, lang) for l in lines]
     ambiguous = []
     seen = set()
     for j in range(func.start, min(func.end, before_line) + 1):
         if not masked[j].strip():
             continue
+        names = shapes.call_names(lang, masked[j])
+        if not names:
+            continue
         stmt, _e = extract._complete_statement(lang, lines, masked, j)
         mstmt = shapes.mask_code(stmt, lang)
-        for cname in shapes.call_names(lang, lines[j]):
+        for cname in names:
             if cname in seen:
                 continue
             seen.add(cname)
@@ -334,8 +312,8 @@ def _callee_guard(repo, sha, cpath, text, lang, funcs, func, family,
                 stray = [
                     i
                     for i, ml in enumerate(masked)
-                    if _word_re(cname).search(ml)
-                    and not _call_re(cname).search(ml)
+                    if shapes._word_re(cname).search(ml)
+                    and not shapes._call_re(cname).search(ml)
                     and not _is_import_line(lang, ml)
                 ]
                 if stray:
@@ -346,20 +324,31 @@ def _callee_guard(repo, sha, cpath, text, lang, funcs, func, family,
                 targets, amb = _callee_defs(repo, sha, cpath, cname)
                 ambiguous.extend(amb)
             for tpath, ttext, tlang, tfuncs, cand in targets:
-                tl = ttext.splitlines()
-                tm = [shapes.mask_code(l, tlang) for l in tl]
+                if ttext is text:
+                    tl, tm = lines, masked
+                else:
+                    tl = ttext.splitlines()
+                    tm = [shapes.mask_code(l, tlang) for l in tl]
                 params = _head_params(tl, tm, cand, cname, tlang)
                 mapped = None if not roots else (
                     _mapped_params(args, params, bound_names) or None
                 )
                 if _family_guard(
-                    ttext, tlang, cand, family, mapped, cand.end
+                    tl, tm, tlang, cand, family, mapped, cand.end
                 ):
                     return True, ambiguous
     return False, ambiguous
 
 
 # --- sink presence ------------------------------------------------------------------
+
+
+def _sink_line(lines, lang, fn, sink_op):
+    """First line in fn whose catalogued sink op matches, or None."""
+    for j in range(fn.start, fn.end + 1):
+        if shapes.sink_op(lang, lines[j]) == sink_op:
+            return j
+    return None
 
 
 def sink_present(repo, sha, path, sink_function, sink_op):
@@ -391,10 +380,7 @@ def sink_present(repo, sha, path, sink_function, sink_op):
             return None
         return False
     lines = text.splitlines()
-    for j in range(fn.start, fn.end + 1):
-        if shapes.sink_op(lang, lines[j]) == sink_op:
-            return True
-    return False
+    return _sink_line(lines, lang, fn, sink_op) is not None
 
 
 def _sink_args(lines, masked, lang, sink_line, sink_op):
@@ -435,8 +421,8 @@ def _is_import_line(lang, masked_line):
 def _find_callers(repo, sha, cpath, cfunc):
     """(callers, ambiguous) bound to one callee at one commit.
 
-    callers: (fpath, ftext, flang, ffuncs, enclosing FuncRange|None,
-              call_line, arg_roots frozenset)
+    callers: (fpath, ftext, flines, fmasked, flang, ffuncs,
+              enclosing FuncRange|None, call_line, arg_roots frozenset)
     ambiguous: markers for every mention the walk cannot bind,
     getattr/dispatch references, shadowed local defs, unparsable call
     sites. A candidate file in an unsupported extension is outside the
@@ -446,8 +432,8 @@ def _find_callers(repo, sha, cpath, cfunc):
     cand_paths = sorted(gitlog.grep_files(repo, name, sha))
     callers = []
     ambiguous = []
-    call_re = _call_re(name)
-    word_re = _word_re(name)
+    call_re = shapes._call_re(name)
+    word_re = shapes._word_re(name)
     quoted_re = _quoted_re(name)
     for fpath in cand_paths:
         flang = shapes.language_for_path(fpath)
@@ -486,7 +472,7 @@ def _find_callers(repo, sha, cpath, cfunc):
         for i in sorted(call_lines):
             if fpath == cpath and cfunc.start <= i <= cfunc.end:
                 continue  # recursion adds no new entry path
-            enc = _enclosing_func(ffuncs, i)
+            enc = extract._enclosing(ffuncs, i, kind="func")
             stmt, _e = extract._complete_statement(
                 flang, flines, fmasked, i
             )
@@ -495,7 +481,10 @@ def _find_callers(repo, sha, cpath, cfunc):
                 ambiguous.append(f"call-unbound:{fpath}:{i + 1}")
                 continue
             roots = frozenset(r for r in _arg_roots(args) if r)
-            callers.append((fpath, ftext, flang, ffuncs, enc, i, roots))
+            callers.append(
+                (fpath, ftext, flines, fmasked, flang, ffuncs, enc, i,
+                 roots)
+            )
     return callers, ambiguous
 
 
@@ -523,20 +512,17 @@ def family_coverage(repo, sha, path, sink_function, sink_op, family, depth):
         return Coverage(UNPROVABLE, ("sink-function-absent",))
     lines = text.splitlines()
     masked = [shapes.mask_code(l, lang) for l in lines]
-    sink_line = None
-    for j in range(fn.start, fn.end + 1):
-        if shapes.sink_op(lang, lines[j]) == sink_op:
-            sink_line = j
-            break
+    sink_line = _sink_line(lines, lang, fn, sink_op)
     if sink_line is None:
         return Coverage(ABSENT, ("no-sink-op",))
     bound = _sink_args(lines, masked, lang, sink_line, sink_op)
     bound = frozenset(bound) if bound else None
     ambiguous = []
-    if _family_guard(text, lang, fn, family, bound, sink_line):
+    if _family_guard(lines, masked, lang, fn, family, bound, sink_line):
         return Coverage(COVERED, ("function-scope",))
     covered, amb = _callee_guard(
-        repo, sha, path, text, lang, funcs, fn, family, bound, sink_line
+        repo, sha, path, text, lines, masked, lang, funcs, fn, family,
+        bound, sink_line,
     )
     ambiguous.extend(amb)
     if covered:
@@ -552,25 +538,27 @@ def family_coverage(repo, sha, path, sink_function, sink_op, family, depth):
         for cpath, cfunc in frontier:
             found, amb = _find_callers(repo, sha, cpath, cfunc)
             ambiguous.extend(amb)
-            for fpath, ftext, flang, ffuncs, enc, call_line, roots in found:
+            for (fpath, ftext, flines, fmasked, flang, ffuncs, enc,
+                 call_line, roots) in found:
                 bound2 = roots if roots else None
                 if enc is None:
                     if _module_guard(
-                        ftext, flang, ffuncs, family, bound2, call_line
+                        flines, fmasked, flang, ffuncs, family, bound2,
+                        call_line,
                     ):
                         return Coverage(
                             COVERED, (f"module-scope:{fpath}",)
                         )
                     continue  # unguarded module entry: resolvable, no chain
                 if _family_guard(
-                    ftext, flang, enc, family, bound2, call_line
+                    flines, fmasked, flang, enc, family, bound2, call_line
                 ):
                     return Coverage(
                         COVERED, (f"caller:{fpath}:{enc.qualname}",)
                     )
                 covered, amb = _callee_guard(
-                    repo, sha, fpath, ftext, flang, ffuncs, enc, family,
-                    bound2, call_line,
+                    repo, sha, fpath, ftext, flines, fmasked, flang,
+                    ffuncs, enc, family, bound2, call_line,
                 )
                 ambiguous.extend(amb)
                 if covered:

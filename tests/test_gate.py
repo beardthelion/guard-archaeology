@@ -10,10 +10,7 @@ the re-fix has landed, must emit zero candidates. Re-runs must be
 byte-identical (R18).
 """
 
-import json
 import re
-
-from archaeology import cli
 
 BASE = "def recv(body):\n    return open(body).read()\n"
 GUARDED = (
@@ -45,34 +42,21 @@ def _seeds_file(tmp_path, sha, advisory="CVE-2025-12345"):
     return p
 
 
-def _run(root, out, *extra):
-    rc = cli.main([root, "--out", str(out), *extra])
-    assert rc == 0
-    return out
-
-
-def _rows(path):
-    with open(path) as fh:
-        return [json.loads(l) for l in fh if l.strip()]
-
-
-def _candidates(rows):
-    return [r for r in rows if r["type"] == "candidate"]
-
-
-def test_gate_regressed_row_end_to_end(make_repo, tmp_path):
+def test_gate_regressed_row_end_to_end(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
     """The lost guard surfaces as a REGRESSED candidate with the true
     seed and removal commits, run under --until (R21, gate leg 1)."""
     r = make_repo(GATE_COMMITS)
     boundary = r.shas[3]  # the commit just before the second fix
     seeds = _seeds_file(tmp_path, r.shas[1])
     out = tmp_path / "gate.jsonl"
-    _run(
+    run_cli(
         r.root, out,
         "--until", boundary,
         "--seeds-file", str(seeds),
     )
-    rows = _rows(out)
+    rows = read_jsonl(out)
 
     hdr = rows[0]
     assert hdr["type"] == "run"
@@ -83,7 +67,7 @@ def test_gate_regressed_row_end_to_end(make_repo, tmp_path):
     assert hdr["relocated"] == 0
     assert hdr["unknown"] == 0
 
-    cands = _candidates(rows)
+    cands = candidates(rows)
     assert len(cands) == 1
     c = cands[0]
 
@@ -110,39 +94,43 @@ def test_gate_regressed_row_end_to_end(make_repo, tmp_path):
     assert c["holdout"] is None
 
 
-def test_gate_refix_closes_the_regression(make_repo, tmp_path):
+def test_gate_refix_closes_the_regression(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
     """At HEAD the second fix has landed: the same history must emit
     zero candidates (the negative half of the gate shape)."""
     r = make_repo(GATE_COMMITS)
     out = tmp_path / "head.jsonl"
-    _run(r.root, out)
-    rows = _rows(out)
+    run_cli(r.root, out)
+    rows = read_jsonl(out)
     hdr = rows[0]
     assert hdr["type"] == "run"
     assert hdr["seeds"] == 2  # both fix commits signal
     assert hdr["regressed"] == 0
-    assert _candidates(rows) == []
+    assert candidates(rows) == []
 
 
-def test_gate_until_before_removal_is_quiet(make_repo, tmp_path):
+def test_gate_until_before_removal_is_quiet(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
     """--until pinned to the seed commit itself: the guard still lives
     at the boundary, so no removal can be claimed."""
     r = make_repo(GATE_COMMITS)
     out = tmp_path / "before.jsonl"
-    _run(r.root, out, "--until", r.shas[1])
-    rows = _rows(out)
+    run_cli(r.root, out, "--until", r.shas[1])
+    rows = read_jsonl(out)
     assert rows[0]["intact"] == 1
     assert rows[0]["regressed"] == 0
-    assert _candidates(rows) == []
+    assert candidates(rows) == []
 
 
-def test_gate_rerun_byte_identical(make_repo, tmp_path):
+def test_gate_rerun_byte_identical(make_repo, tmp_path, run_cli):
     """Determinism: two runs over the same clone diff clean (R18)."""
     r = make_repo(GATE_COMMITS)
     boundary = r.shas[3]
     out_a = tmp_path / "a.jsonl"
     out_b = tmp_path / "b.jsonl"
-    _run(r.root, out_a, "--until", boundary)
-    _run(r.root, out_a, "--until", boundary)  # same path, re-run
-    _run(r.root, out_b, "--until", boundary)  # different path, re-run
+    run_cli(r.root, out_a, "--until", boundary)
+    run_cli(r.root, out_a, "--until", boundary)  # same path, re-run
+    run_cli(r.root, out_b, "--until", boundary)  # different path, re-run
     assert out_a.read_bytes() == out_b.read_bytes()

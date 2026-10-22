@@ -26,18 +26,10 @@ from dataclasses import dataclass
 
 from . import callers, gitlog, track
 
-VERDICTS = (
-    "regressed",
-    "relocated",
-    "removed_with_sink",
-    "deliberate",
-    "unknown",
-)
-
-
 @dataclass(frozen=True)
 class Verdict:
-    """One classified removal; ``verdict`` is one of VERDICTS."""
+    """One classified removal; ``verdict`` is one of regressed,
+    relocated, removed_with_sink, deliberate, unknown."""
 
     outcome: track.TrackOutcome
     verdict: str
@@ -106,11 +98,9 @@ def _deliberate_language(repo, sha, seed_sha):
 
 def _removal_path(repo, outcome):
     """Lineage name in force at the removal commit."""
-    active = outcome.guard.path
-    for rsha, _old, new in outcome.renames:
-        if gitlog.is_ancestor(repo, rsha, outcome.candidate_sha):
-            active = new
-    return active
+    return track._path_at(
+        outcome.renames, outcome.guard.path, repo, outcome.candidate_sha
+    )
 
 
 def _verdict(outcome, verdict, removal_sha=None, removal_subject=None,

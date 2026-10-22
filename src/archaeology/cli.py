@@ -1,8 +1,8 @@
 """CLI entry point: archaeology <repo-root> [flags].
 
-Pipeline stages are wired as module-level functions so later units can
-fill them in without reshaping run(): collect_seeds -> extract_guards ->
-track_guards -> classify -> build_rows -> write_outputs.
+run() wires the pipeline stages in order: collect_seeds ->
+extract_guards -> track_guards -> classify_all -> build_rows ->
+write_outputs.
 """
 
 from __future__ import annotations
@@ -71,30 +71,13 @@ def _fail(msg: str, code: int = 2) -> int:
 
 
 def _parse_args(argv):
-    args = build_parser().parse_args(argv)
-    if args.caller_depth < 0:
-        raise ArchaeologyError("--caller-depth must be >= 0")
-    return args
+    return build_parser().parse_args(argv)
 
 
-# --- pipeline seams -----------------------------------------------------------
-# collect_seeds lives in seeds.py (U2). The remaining stages are stubs that
-# later units replace; run() already calls them in final order.
-
-
-def extract_guards(seed_set, repo):
-    """U3: seed diffs -> guard records (extract.Extraction)."""
-    return extract.extract_guards(repo, seed_set)
-
-
-def track_guards(records, repo, until=None):
-    """U4: guard records -> INTACT or candidate-removal outcomes."""
-    return track.track_guards(repo, records, until=until)
-
-
-def classify_removals(outcomes, repo, caller_depth=2):
-    """U5: candidate removals -> five-verdict classification."""
-    return classify.classify_all(repo, outcomes, caller_depth=caller_depth)
+_VERDICT_KEYS = frozenset(
+    {"regressed", "relocated", "removed_with_sink", "deliberate",
+     "unknown"}
+)
 
 
 def classify_counts(seed_set, records, outcomes, verdicts) -> RunCounts:
@@ -108,53 +91,15 @@ def classify_counts(seed_set, records, outcomes, verdicts) -> RunCounts:
     verdicts = verdicts or ()
     counts = RunCounts(seeds=len(seed_set.seeds), tracked=len(records))
     for o in outcomes:
-        if getattr(o, "status", None) == "intact":
+        if o.status == "intact":
             counts.intact += 1
     for v in verdicts:
-        name = getattr(v, "verdict", None)
-        key = str(name).lower().replace("-", "_") if name else "unknown"
-        if key == "regressed":
-            counts.regressed += 1
-        elif key == "relocated":
-            counts.relocated += 1
-        elif key == "removed_with_sink":
-            counts.removed_with_sink += 1
-        elif key == "deliberate":
-            counts.deliberate += 1
-        else:
-            counts.unknown += 1
+        name = v.verdict if v.verdict in _VERDICT_KEYS else "unknown"
+        setattr(counts, name, getattr(counts, name) + 1)
     counts.unknown += max(
         len(outcomes) - counts.intact - len(verdicts), 0
     )
     return counts
-
-
-def build_rows(repo, counts: RunCounts, verdicts, unresolvable=(),
-               extract_errors=(), track_errors=(), classify_errors=(),
-               emap=None, holdout=None) -> list:
-    """JSONL rows: run header, sorted REGRESSED candidates, error rows."""
-    return emit.build_rows(
-        repo,
-        counts,
-        verdicts,
-        unresolvable=unresolvable,
-        extract_errors=extract_errors,
-        track_errors=track_errors,
-        classify_errors=classify_errors,
-        emap=emap,
-        holdout=holdout,
-    )
-
-
-def render_markdown(counts: RunCounts, candidates) -> str:
-    """Markdown render of the same row set: counts then per-family
-    candidate sections (R16)."""
-    return emit.render_markdown(counts, candidates)
-
-
-def write_outputs(rows: list, out_path: str, also_md: bool = False,
-                  md_text: str = None) -> None:
-    emit.write_outputs(rows, out_path, also_md=also_md, md_text=md_text)
 
 
 def summary_line(counts: RunCounts) -> str:
@@ -169,12 +114,12 @@ def summary_line(counts: RunCounts) -> str:
 
 def run(
     repo_root: str,
-    out: str = None,
-    seeds_file: str = None,
-    since: str = None,
-    until: str = None,
+    out: str | None = None,
+    seeds_file: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
     caller_depth: int = 2,
-    exposure_file: str = None,
+    exposure_file: str | None = None,
     also_md: bool = False,
 ) -> int:
     """Run the pipeline and write outputs; returns 0 or raises."""
@@ -195,38 +140,40 @@ def run(
     except (seeds.SeedsError, gitlog.GitError) as e:
         raise ArchaeologyError(str(e))
 
-    extraction = extract_guards(seed_set, real)
+    extraction = extract.extract_guards(real, seed_set)
     records = extraction.records
-    tracking = track_guards(records, real, until=until)
+    tracking = track.track_guards(real, records, until=until)
     outcomes = tracking.outcomes
-    classification = classify_removals(
-        outcomes, real, caller_depth=caller_depth
+    classification = classify.classify_all(
+        real, outcomes, caller_depth=caller_depth
     )
     counts = classify_counts(
         seed_set, records, outcomes, classification.verdicts
     )
     emap = exposure.load_exposure(real, exposure_file=exposure_file)
     hidx = emit.load_holdout_rows(real)
-    rows = build_rows(
+    rows = emit.build_rows(
         real,
         counts,
         classification.verdicts,
-        seed_set.unresolvable,
-        extraction.errors,
-        tracking.errors,
-        classification.errors,
+        unresolvable=seed_set.unresolvable,
+        extract_errors=extraction.errors,
+        track_errors=tracking.errors,
+        classify_errors=classification.errors,
         emap=emap,
         holdout=hidx,
     )
     candidates = [r for r in rows if r.get("type") == "candidate"]
 
     try:
-        write_outputs(
+        emit.write_outputs(
             rows,
             out_path,
             also_md=also_md,
             md_text=(
-                render_markdown(counts, candidates) if also_md else None
+                emit.render_markdown(counts, candidates)
+                if also_md
+                else None
             ),
         )
     except OSError as e:

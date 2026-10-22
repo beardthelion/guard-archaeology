@@ -24,7 +24,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
 import tempfile
 from dataclasses import asdict, is_dataclass
 
@@ -32,10 +31,6 @@ from . import exposure, gitlog
 
 _EXCERPT_CTX = 3  # context lines each side of the sink op in "current"
 _MAX_HOLDOUT_BYTES = 16 * 1024 * 1024
-
-
-def _warn(msg: str) -> None:
-    print(f"archaeology: {msg}", file=sys.stderr)
 
 
 def norm_qualname(name) -> str:
@@ -74,12 +69,12 @@ def load_holdout_rows(repo_root: str) -> dict:
         return {}
     try:
         if os.path.getsize(path) > _MAX_HOLDOUT_BYTES:
-            _warn("ignoring oversized holdout.jsonl")
+            exposure._warn("ignoring oversized holdout.jsonl")
             return {}
         with open(path, "r", encoding="utf-8") as fh:
             text = fh.read()
     except OSError as e:
-        _warn(f"ignoring unreadable holdout.jsonl: {e}")
+        exposure._warn(f"ignoring unreadable holdout.jsonl: {e}")
         return {}
     idx = {}
     bad = 0
@@ -107,7 +102,7 @@ def load_holdout_rows(repo_root: str) -> dict:
                 "rank_score": row.get("rank_score"),
             }
     if bad:
-        _warn(f"holdout.jsonl: skipped {bad} malformed line(s)")
+        exposure._warn(f"holdout.jsonl: skipped {bad} malformed line(s)")
     return idx
 
 
@@ -301,7 +296,7 @@ def _atomic_write(path: str, text: str) -> None:
 
 
 def write_outputs(rows: list, out_path: str, also_md: bool = False,
-                  md_text: str = None) -> None:
+                  md_text: str | None = None) -> None:
     text = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
     _atomic_write(out_path, text)
     if also_md:

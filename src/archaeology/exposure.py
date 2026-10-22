@@ -93,7 +93,7 @@ def _parse_scope_boundary(path: str) -> dict:
     return out
 
 
-def load_exposure(repo_root: str, exposure_file: str = None) -> dict:
+def load_exposure(repo_root: str, exposure_file: str | None = None) -> dict:
     """Resolve the exposure map. Key 'path:function' -> bucket; entry ids
     ride under 'entry:path:function'."""
     if exposure_file:

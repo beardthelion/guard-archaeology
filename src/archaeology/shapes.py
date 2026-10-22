@@ -24,8 +24,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-LANGUAGES = ("go", "rust", "python", "tsjs")
-
 EXT_TO_LANG = {
     ".go": "go",
     ".rs": "rust",
@@ -39,18 +37,6 @@ EXT_TO_LANG = {
     ".mjs": "tsjs",
     ".cjs": "tsjs",
 }
-
-FAMILIES = (
-    "bounds",
-    "validation",
-    "allowlist",
-    "auth",
-    "escape",
-    "type-range",
-    "symlink",
-)
-
-SHAPES = ("conditional-rejection", "validation-call", "constant-limit")
 
 
 def language_for_path(path):
@@ -67,6 +53,21 @@ def basename(dotted):
     """Last segment of a dotted or :: separated callee name."""
     base = dotted.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
     return base.rstrip("!")
+
+
+def _call_re(name):
+    """Bare ``name(`` invocation: not attribute- or ``$``-qualified."""
+    return re.compile(r"(?<![\w$.])" + re.escape(name) + r"\s*\(")
+
+
+def _word_re(name):
+    """Whole-word mention of ``name`` (not glued to word chars or ``$``).
+
+    Attribute mentions (mod.name, obj.name()) match too: only the bare
+    ``name(`` form is a bound call site, so a match that is not a call
+    or declaration is a mention, never a callee.
+    """
+    return re.compile(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])")
 
 
 # --- language tables ----------------------------------------------------------
@@ -948,8 +949,7 @@ def _find_brace(lang, text):
     out = []
     for start, end, name, kind, recv in items:
         enclosing = sorted(
-            x for x in items
-            if x[0] < start <= x[1] and x[0] != start
+            x for x in items if x[0] < start <= x[1]
         )
         names = [x[2] for x in enclosing]
         if recv:

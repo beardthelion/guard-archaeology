@@ -54,10 +54,6 @@ class Seed:
     date: int = 0
     subject: str = ""
 
-    @property
-    def ref(self):
-        return self.source.split(":", 1)[1] if ":" in self.source else None
-
 
 @dataclass(frozen=True)
 class SeedSet:
@@ -116,10 +112,11 @@ def _security_ref_seeds(repo, window):
         short = name.rsplit("/", 1)[-1]
         if SECURITY_REF_RE.search(short):
             marked.append(name)
+    targets = {name: gitlog.resolve_commit(repo, name) for name in marked}
 
     records = []
     for name in marked:
-        target = gitlog.resolve_commit(repo, name)
+        target = targets[name]
         if target is None or target not in window:
             continue
         bounders = [
@@ -128,10 +125,9 @@ def _security_ref_seeds(repo, window):
             if ref_name != name and t != target
             and gitlog.is_ancestor(repo, t, target)
         ]
-        for other in marked:
+        for other, t in targets.items():
             if other == name:
                 continue
-            t = gitlog.resolve_commit(repo, other)
             if t and t != target and gitlog.is_ancestor(repo, t, target):
                 bounders.append(t)
         if bounders:
@@ -177,8 +173,9 @@ def collect_seeds(repo, seeds_file=None, since=None, until=None):
             add(sha if sha is not None else token, advisory_id,
                 SOURCE_SEEDS_FILE, resolved=sha is not None)
 
+    messages = gitlog.commit_messages(repo, until=until, since=since)
     for c in commits:
-        if message_has_signal(c.subject, gitlog.commit_message(repo, c.sha)):
+        if message_has_signal(c.subject, messages.get(c.sha, "")):
             add(c.sha, None, SOURCE_MESSAGE)
 
     for ref_name, shas in _security_ref_seeds(repo, window):

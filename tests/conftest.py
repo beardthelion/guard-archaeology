@@ -112,3 +112,25 @@ def read_jsonl():
             return [json.loads(line) for line in fh if line.strip()]
 
     return _read
+
+
+@pytest.fixture
+def run_cli():
+    """Run the archaeology CLI writing JSONL to out; returns out."""
+    from archaeology import cli
+
+    def _run(root, out, *extra):
+        assert cli.main([str(root), "--out", str(out), *extra]) == 0
+        return out
+
+    return _run
+
+
+@pytest.fixture
+def candidates():
+    """Rows of type 'candidate' from a read_jsonl result."""
+
+    def _candidates(rows):
+        return [r for r in rows if r["type"] == "candidate"]
+
+    return _candidates

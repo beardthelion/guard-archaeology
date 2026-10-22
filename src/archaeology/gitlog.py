@@ -112,14 +112,6 @@ def resolve_commit(repo, rev):
     return resolve(repo, f"{rev}^{{commit}}")
 
 
-def head(repo):
-    return rev_parse(repo, "HEAD")
-
-
-def git_dir(repo):
-    return _run(repo, ["rev-parse", "--git-dir"]).strip()
-
-
 def is_git_repo(repo):
     try:
         _run(repo, ["rev-parse", "--git-dir"])
@@ -213,6 +205,27 @@ def commit(repo, sha):
 def commit_message(repo, sha):
     """Full commit message (subject plus body)."""
     return _run(repo, ["log", "-1", "--format=%B", sha]).rstrip("\n")
+
+
+def commit_messages(repo, until=None, since=None):
+    """{sha: full message} for the bounded window, in one git call.
+
+    Same rev bounds as log(); each record parses as
+    ``\\x1e<sha>\\x1f<message>``.
+    """
+    rev = until or "HEAD"
+    if until is None and resolve(repo, "HEAD") is None:
+        return {}  # unborn HEAD: a repo with zero commits
+    spec = f"{since}..{rev}" if since else rev
+    out = _run(repo, ["log", "--format=%x1e%H%x1f%B", spec])
+    messages = {}
+    for rec in out.split("\x1e"):
+        sha, _sep, msg = rec.partition("\x1f")
+        sha = sha.strip()
+        if not sha:
+            continue
+        messages[sha] = msg.rstrip("\n")
+    return messages
 
 
 def merge_constituent_shas(repo, sha):

@@ -156,10 +156,16 @@ def _const_blocks(lang, masked):
     return ranges
 
 
-def _enclosing(funcs, i):
-    """Innermost FuncRange containing line i, or None."""
+def _enclosing(funcs, i, kind=None):
+    """Innermost FuncRange containing line i, or None.
+
+    ``kind`` restricts the match (e.g. "func" skips container ranges);
+    None keeps any kind eligible.
+    """
     best = None
     for f in funcs:
+        if kind is not None and f.kind != kind:
+            continue
         if f.start <= i <= f.end and (
             best is None or f.start > best.start
         ):
@@ -181,7 +187,7 @@ def _call_names_in(lines, lang, a, b):
 
 def _call_site(lines, lang, cand, name):
     """First line inside cand where `name` is invoked as a bare callee."""
-    cre = re.compile(r"(?<![\w$.])" + re.escape(name) + r"\s*\(")
+    cre = shapes._call_re(name)
     for j in range(cand.start, cand.end + 1):
         masked = shapes.mask_code(lines[j], lang)
         if cre.search(masked):
@@ -231,7 +237,7 @@ def _find_constant_sink(lines, lang, funcs, name, decl_line, decl_func):
     The consult line must carry a guard cue (comparison, control keyword,
     membership, or call).
     """
-    name_re = re.compile(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])")
+    name_re = shapes._word_re(name)
     cands = [decl_func] if decl_func is not None else list(funcs)
     for f in sorted(cands, key=lambda f: f.start):
         first_sink = None

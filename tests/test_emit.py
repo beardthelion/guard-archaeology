@@ -5,7 +5,7 @@ import json
 import os
 import re
 
-from archaeology import cli, emit, exposure
+from archaeology import cli, emit
 
 BASE = "def recv(body):\n    return open(body).read()\n"
 GUARDED = (
@@ -35,14 +35,6 @@ EXPECTED = os.path.join(
 )
 
 
-def _run_cli(root, out, *extra):
-    assert cli.main([root, "--out", str(out), *extra]) == 0
-
-
-def _candidates(rows):
-    return [r for r in rows if r["type"] == "candidate"]
-
-
 def _plant_clawpatch(root, name, text):
     cp = os.path.join(root, ".clawpatch")
     os.makedirs(cp, exist_ok=True)
@@ -58,21 +50,23 @@ def _plant_holdout(root, rows):
     )
 
 
-def test_golden_jsonl_byte_identical(make_repo, tmp_path):
+def test_golden_jsonl_byte_identical(make_repo, tmp_path, run_cli):
     r = make_repo(REGRESSED_COMMITS)
     out = tmp_path / "a.jsonl"
-    _run_cli(r.root, out)
+    run_cli(r.root, out)
     first = out.read_bytes()
-    _run_cli(r.root, out)
+    run_cli(r.root, out)
     assert out.read_bytes() == first
     with open(EXPECTED, "rb") as fh:
         assert first == fh.read()
 
 
-def test_header_counts_sum_to_tracked(make_repo, tmp_path, read_jsonl):
+def test_header_counts_sum_to_tracked(
+    make_repo, tmp_path, run_cli, read_jsonl
+):
     r = make_repo(REGRESSED_COMMITS)
     out = tmp_path / "a.jsonl"
-    _run_cli(r.root, out)
+    run_cli(r.root, out)
     hdr = read_jsonl(out)[0]
     assert hdr["type"] == "run"
     total = (
@@ -86,12 +80,14 @@ def test_header_counts_sum_to_tracked(make_repo, tmp_path, read_jsonl):
     assert total == hdr["tracked"]
 
 
-def test_candidate_row_shape(make_repo, tmp_path, read_jsonl):
+def test_candidate_row_shape(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
     r = make_repo(REGRESSED_COMMITS)
     out = tmp_path / "a.jsonl"
-    _run_cli(r.root, out)
+    run_cli(r.root, out)
     rows = read_jsonl(out)
-    cands = _candidates(rows)
+    cands = candidates(rows)
     assert len(cands) == 1
     c = cands[0]
     assert re.fullmatch(r"archaeology-\w+-[0-9a-f]{10}", c["id"])
@@ -111,7 +107,9 @@ def test_candidate_row_shape(make_repo, tmp_path, read_jsonl):
     assert c["holdout"] is None
 
 
-def test_candidates_sorted_by_removal_date(make_repo, tmp_path, read_jsonl):
+def test_candidates_sorted_by_removal_date(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
     r = make_repo(
         [
             {
@@ -128,8 +126,8 @@ def test_candidates_sorted_by_removal_date(make_repo, tmp_path, read_jsonl):
         ]
     )
     out = tmp_path / "a.jsonl"
-    _run_cli(r.root, out)
-    cands = _candidates(read_jsonl(out))
+    run_cli(r.root, out)
+    cands = candidates(read_jsonl(out))
     assert [c["sink"]["path"] for c in cands] == ["b.py", "app.py"]
     assert cands[0]["removal"]["sha"] == r.shas[3]
     assert cands[1]["removal"]["sha"] == r.shas[4]
@@ -157,7 +155,7 @@ def test_error_row_for_unresolvable_seed_exits_zero(
 
 
 def test_scope_boundary_applies_to_candidate(
-    make_repo, tmp_path, read_jsonl
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
 ):
     r = make_repo(REGRESSED_COMMITS)
     _plant_clawpatch(
@@ -166,13 +164,15 @@ def test_scope_boundary_applies_to_candidate(
         "- app.py:recv TAINT: yes entry=POST /recv\n",
     )
     out = tmp_path / "a.jsonl"
-    _run_cli(r.root, out)
-    c = _candidates(read_jsonl(out))[0]
+    run_cli(r.root, out)
+    c = candidates(read_jsonl(out))[0]
     assert c["exposure"] == "untrusted"
     assert c["entry"] == "POST"
 
 
-def test_exposure_file_wins_for_candidate(make_repo, tmp_path, read_jsonl):
+def test_exposure_file_wins_for_candidate(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
     r = make_repo(REGRESSED_COMMITS)
     _plant_clawpatch(
         r.root, "scope-boundary.md", "- app.py:recv TAINT: yes\n"
@@ -180,13 +180,15 @@ def test_exposure_file_wins_for_candidate(make_repo, tmp_path, read_jsonl):
     ef = tmp_path / "exp.json"
     ef.write_text(json.dumps({"app.py:recv": "internal"}))
     out = tmp_path / "a.jsonl"
-    _run_cli(r.root, out, "--exposure-file", str(ef))
-    c = _candidates(read_jsonl(out))[0]
+    run_cli(r.root, out, "--exposure-file", str(ef))
+    c = candidates(read_jsonl(out))[0]
     assert c["exposure"] == "internal"
     assert c["entry"] is None
 
 
-def test_holdout_join_on_matching_sink(make_repo, tmp_path, read_jsonl):
+def test_holdout_join_on_matching_sink(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
     r = make_repo(REGRESSED_COMMITS)
     _plant_holdout(
         r.root,
@@ -219,8 +221,8 @@ def test_holdout_join_on_matching_sink(make_repo, tmp_path, read_jsonl):
         ],
     )
     out = tmp_path / "a.jsonl"
-    _run_cli(r.root, out)
-    c = _candidates(read_jsonl(out))[0]
+    run_cli(r.root, out)
+    c = candidates(read_jsonl(out))[0]
     assert c["holdout"] == {
         "id": "holdout-bounds-0123456789",
         "family": "bounds",
@@ -255,19 +257,19 @@ def test_holdout_index_normalizes_qualnames(tmp_path):
 
 
 def test_malformed_holdout_warns_field_null(
-    make_repo, tmp_path, capsys, read_jsonl
+    make_repo, tmp_path, capsys, run_cli, read_jsonl, candidates
 ):
     r = make_repo(REGRESSED_COMMITS)
     _plant_clawpatch(r.root, "holdout.jsonl", "{not json\n")
     out = tmp_path / "a.jsonl"
-    _run_cli(r.root, out)
+    run_cli(r.root, out)
     assert "holdout" in capsys.readouterr().err
-    c = _candidates(read_jsonl(out))[0]
+    c = candidates(read_jsonl(out))[0]
     assert c["holdout"] is None
 
 
 def test_holdout_symlink_escape_ignored(
-    make_repo, tmp_path, capsys, read_jsonl
+    make_repo, tmp_path, capsys, run_cli, read_jsonl, candidates
 ):
     r = make_repo(REGRESSED_COMMITS)
     outside = tmp_path / "outside.jsonl"
@@ -287,16 +289,18 @@ def test_holdout_symlink_escape_ignored(
     os.makedirs(cp, exist_ok=True)
     os.symlink(outside, os.path.join(cp, "holdout.jsonl"))
     out = tmp_path / "a.jsonl"
-    _run_cli(r.root, out)
+    run_cli(r.root, out)
     assert "outside target root" in capsys.readouterr().err
-    c = _candidates(read_jsonl(out))[0]
+    c = candidates(read_jsonl(out))[0]
     assert c["holdout"] is None
 
 
-def test_also_md_renders_same_row_set(make_repo, tmp_path, read_jsonl):
+def test_also_md_renders_same_row_set(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
     r = make_repo(REGRESSED_COMMITS)
     out = tmp_path / "a.jsonl"
-    _run_cli(r.root, out, "--also-md")
+    run_cli(r.root, out, "--also-md")
     md_path = tmp_path / "a.md"
     assert md_path.exists()
     md = md_path.read_text()
@@ -304,7 +308,7 @@ def test_also_md_renders_same_row_set(make_repo, tmp_path, read_jsonl):
     hdr = rows[0]
     assert f"- regressed: {hdr['regressed']}" in md
     assert f"- tracked: {hdr['tracked']}" in md
-    c = _candidates(rows)[0]
+    c = candidates(rows)[0]
     loc = (
         f"{c['sink']['path']}:{c['sink']['function']}:{c['sink']['line']}"
     )
