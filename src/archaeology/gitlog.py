@@ -407,22 +407,72 @@ def show_patch(repo, sha):
 # --- pickaxe and lineage ------------------------------------------------------
 
 def pickaxe(repo, query, paths=None, until=None, since=None,
-            fixed_string=False):
+            fixed_string=False, topo=False):
     """SHAs touching paths whose diff matches the pickaxe, newest first.
 
     fixed_string=False queries with -G<regex> (diff-text regex);
     fixed_string=True queries with -S<string> (literal add/remove count).
     Both run under --full-history so merged side branches are not hidden
-    by TREESAME simplification.
+    by TREESAME simplification. topo=True orders --topo-order so a commit
+    never precedes its parent, even under clock skew.
     """
     flag = f"-S{query}" if fixed_string else f"-G{query}"
     rev = until or "HEAD"
     spec = f"{since}..{rev}" if since else rev
     argv = ["log", "--full-history", flag, "--format=%H", spec]
+    if topo:
+        argv.insert(2, "--topo-order")
     if paths:
         argv += ["--", *paths]
     out = _run(repo, argv)
     return [l.strip() for l in out.splitlines() if l.strip()]
+
+
+def path_events(repo, path, until=None):
+    """(sha, status, old_path, new_path) records for a path, newest first.
+
+    Built from 'git log --full-history --name-status -M -- path' so side
+    branches merged into the window are not hidden by TREESAME
+    simplification. The pathspec filter splits rename pairs: a rename away
+    from the path shows as D, a rename in shows as A. Callers disambiguate
+    those against name_status() on the same commit.
+    """
+    argv = [
+        "log", "--full-history", "--name-status", "-M", "--format=%H",
+        until or "HEAD", "--", path,
+    ]
+    out = _run(repo, argv)
+    events = []
+    sha = None
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if re.fullmatch(r"[0-9a-f]+", line):
+            sha = line
+            continue
+        if sha is None:
+            continue
+        parts = line.split("\t")
+        if parts[0].startswith(("R", "C")) and len(parts) == 3:
+            events.append((sha, parts[0][0], parts[1], parts[2]))
+        elif len(parts) == 2:
+            events.append((sha, parts[0][0], parts[1], parts[1]))
+    return events
+
+
+def name_status(repo, sha):
+    """(status, old_path, new_path) records for one commit (-M on)."""
+    out = _run(repo, ["show", "-M", "--name-status", "--format=", sha])
+    records = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if not parts or not parts[0]:
+            continue
+        if parts[0].startswith(("R", "C")) and len(parts) == 3:
+            records.append((parts[0][0], parts[1], parts[2]))
+        elif len(parts) == 2:
+            records.append((parts[0][0], parts[1], parts[1]))
+    return records
 
 
 def rename_lineage(repo, path, until=None):

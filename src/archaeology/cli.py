@@ -14,7 +14,7 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass
 
-from . import extract, gitlog, seeds
+from . import extract, gitlog, seeds, track
 
 
 class ArchaeologyError(Exception):
@@ -89,9 +89,9 @@ def extract_guards(seed_set, repo):
     return extract.extract_guards(repo, seed_set)
 
 
-def track_guards(records, repo, until=None) -> list:
+def track_guards(records, repo, until=None):
     """U4: guard records -> INTACT or candidate-removal outcomes."""
-    return []
+    return track.track_guards(repo, records, until=until)
 
 
 def classify_removals(outcomes, repo, caller_depth=2) -> list:
@@ -99,15 +99,23 @@ def classify_removals(outcomes, repo, caller_depth=2) -> list:
     return []
 
 
-def classify_counts(seed_set, records, verdicts) -> RunCounts:
-    """Fold stage outputs into the run-summary counts."""
+def classify_counts(seed_set, records, outcomes, verdicts) -> RunCounts:
+    """Fold stage outputs into the run-summary counts.
+
+    INTACT is assigned by tracking (R6) and counted from the tracking
+    outcomes; the five removal verdicts come from classify's output. A
+    non-intact outcome with no verdict yet counts as unknown (U5 pending).
+    """
+    outcomes = outcomes or ()
+    verdicts = verdicts or ()
     counts = RunCounts(seeds=len(seed_set.seeds), tracked=len(records))
-    for v in verdicts or ():
+    for o in outcomes:
+        if getattr(o, "status", None) == "intact":
+            counts.intact += 1
+    for v in verdicts:
         name = getattr(v, "verdict", None)
         key = str(name).lower().replace("-", "_") if name else "unknown"
-        if key == "intact":
-            counts.intact += 1
-        elif key == "regressed":
+        if key == "regressed":
             counts.regressed += 1
         elif key == "relocated":
             counts.relocated += 1
@@ -117,10 +125,14 @@ def classify_counts(seed_set, records, verdicts) -> RunCounts:
             counts.deliberate += 1
         else:
             counts.unknown += 1
+    counts.unknown += max(
+        len(outcomes) - counts.intact - len(verdicts), 0
+    )
     return counts
 
 
-def build_rows(counts: RunCounts, unresolvable=(), extract_errors=()) -> list:
+def build_rows(counts: RunCounts, unresolvable=(), extract_errors=(),
+               track_errors=()) -> list:
     """JSONL rows: the run header plus per-failure error rows.
 
     U6 extends this with candidate rows in the drain schema.
@@ -136,7 +148,7 @@ def build_rows(counts: RunCounts, unresolvable=(), extract_errors=()) -> list:
                 "reason": "unresolvable-in-window",
             }
         )
-    for e in extract_errors:
+    for e in (*extract_errors, *track_errors):
         rows.append({"type": "error", **e})
     return rows
 
@@ -215,10 +227,13 @@ def run(
 
     extraction = extract_guards(seed_set, real)
     records = extraction.records
-    outcomes = track_guards(records, real, until=until)
+    tracking = track_guards(records, real, until=until)
+    outcomes = tracking.outcomes
     verdicts = classify_removals(outcomes, real, caller_depth=caller_depth)
-    counts = classify_counts(seed_set, records, verdicts)
-    rows = build_rows(counts, seed_set.unresolvable, extraction.errors)
+    counts = classify_counts(seed_set, records, outcomes, verdicts)
+    rows = build_rows(
+        counts, seed_set.unresolvable, extraction.errors, tracking.errors
+    )
 
     try:
         write_outputs(

@@ -609,10 +609,12 @@ def normalize_statement(lang, stmt_text):
 
 _SIG_TOK_RE = re.compile(r"CALL:[A-Za-z0-9_-]+|ID|NUM|STR|[A-Za-z_$][\w$]*|.")
 
+# These fragments feed git -G, which compiles POSIX ERE: no (?:...) or
+# other Perl-style extensions, plain (...) groups only.
 _ID_CLASS = r"[A-Za-z_$][A-Za-z0-9_$]*"
-_CALL_CLASS = rf"(?:{_ID_CLASS}(?:\.|::))*{_ID_CLASS}"
+_CALL_CLASS = rf"({_ID_CLASS}(\.|::))*{_ID_CLASS}"
 _NUM_CLASS = r"[0-9][A-Za-z0-9._]*"
-_STR_CLASS = r"(?:\"[^\"]*\"|'[^']*'|`[^`]*`)"
+_STR_CLASS = r"(\"[^\"]*\"|'[^']*'|`[^`]*`)"
 
 
 def signature_regex(signature):
