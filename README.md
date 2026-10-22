@@ -7,7 +7,8 @@ Finds security guards a codebase added and later silently lost. Spec-first; see 
 ```
 archaeology <repo-root> [--out <path>] [--seeds-file <path>] \
     [--since <rev>] [--until <rev>] [--caller-depth 2] \
-    [--exposure-file <path>] [--also-md]
+    [--seeds-mode advisory|message|all] [--include-test-seeds] \
+    [--max-seeds N] [--exposure-file <path>] [--also-md]
 ```
 
 Runs against a local clone. No network access, no target code is executed; the pipeline is subprocessed `git` over the clone's own history.
@@ -19,6 +20,9 @@ Runs against a local clone. No network access, no target code is executed; the p
 - `--seeds-file`: newline-separated fix-commit SHAs, optionally `SHA ADVISORY-ID`. Advisory ids propagate to candidate rows. A listed SHA that does not resolve inside the window produces a `type:"error"` row; it is never dropped silently.
 - `--since`/`--until`: rev bounds on tracked history (ancestors of `--until`, minus `--since` ancestry). These are rev bounds, not git's date flags: `--until U` replays history "as of U", which is how a removed-then-refixed guard is demonstrated.
 - `--caller-depth`: how far up the caller chain a guard must be provably absent before REGRESSED is allowed (default 2). Unprovable degrades to UNKNOWN, never REGRESSED.
+- `--seeds-mode`: `advisory` (default) seeds only CVE/GHSA-linked commits, seeds-file entries, and security-marked refs. `message`/`all` also harvest fix-verb x security-term commit messages; that harvest is noisier and off by default.
+- `--include-test-seeds`: keep message-signal seeds whose entire diff touches test/fixture/vendored paths. Off by default, so seeding skews to runtime fixes.
+- `--max-seeds N`: cap the seed list after collection and dedup (default 0 = unbounded). Prints `seeds capped at N of M` on stderr. Use on very large histories when a full pass is not budgeted.
 - `--exposure-file`: JSON map `"path:function" -> "untrusted|internal|unknown"`.
 - `--also-md`: also write a markdown render beside the JSONL (`<out>` with `.md` suffix).
 
@@ -39,3 +43,5 @@ Auto-read files under `<repo-root>/.clawpatch/` are realpath-confined to the tar
 ## Verdicts
 
 Every tracked guard closes as exactly one of: INTACT (present at the boundary, counted, never reported), REGRESSED (reported), RELOCATED, REMOVED-WITH-SINK, DELIBERATE, or UNKNOWN. Rows are candidates for kill-before-debug drain, not findings.
+
+Candidate rows are runtime-only: guards whose sink lives on a test/fixture path are classified but never emitted. Reachability counts framework dispatch registration (`add_route`, `@app.route`, `router.get`, `HandleFunc`, and similar bindings) as a caller edge, so a registered handler can prove out to REGRESSED; bindings the shape tables do not cover stay UNKNOWN.

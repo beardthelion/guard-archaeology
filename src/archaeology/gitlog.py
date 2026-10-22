@@ -318,11 +318,14 @@ def show_file(repo, sha, path):
 # when re-reads are shuffled across the whole window.
 _BLOB_CACHE = {}
 _BLOB_CACHE_CAP = 20_000
+_BLOB_CACHE_BYTES_CAP = 256 * 1024 * 1024
+_BLOB_CACHE_BYTES = [0]
 
 
 def clear_cache():
     """Drop every memoized blob. Called once per run from cli.run."""
     _BLOB_CACHE.clear()
+    _BLOB_CACHE_BYTES[0] = 0
 
 
 def show_file_cached(repo, sha, path):
@@ -337,9 +340,14 @@ def show_file_cached(repo, sha, path):
     result = show_file(repo, sha, path)
     if isinstance(result, str) and len(result) > MAX_BLOB_BYTES:
         return result
-    if len(_BLOB_CACHE) >= _BLOB_CACHE_CAP:
+    if len(_BLOB_CACHE) >= _BLOB_CACHE_CAP or (
+        _BLOB_CACHE_BYTES[0] >= _BLOB_CACHE_BYTES_CAP
+    ):
         _BLOB_CACHE.clear()
+        _BLOB_CACHE_BYTES[0] = 0
     _BLOB_CACHE[key] = result
+    if isinstance(result, str):
+        _BLOB_CACHE_BYTES[0] += len(result)
     return result
 
 
