@@ -280,13 +280,21 @@ _SINK_RES = {
         re.compile(r"\b(?:eval|exec|open|compile|__import__)\s*\("),
         re.compile(
             r"\bos\.(?:system|popen|spawn\w*|exec\w*|remove|unlink|"
-            r"removedirs|rename|renames|symlink|link|mkdir|makedirs|"
-            r"chmod|chown|open|fdopen|read|write|listdir|scandir|walk|"
-            r"stat|lstat|access|startfile|kill)\s*\("
+            r"removedirs|rename|renames|symlink|link|readlink|mkdir|"
+            r"makedirs|chmod|chown|open|fdopen|read|write|listdir|"
+            r"scandir|walk|stat|lstat|access|startfile|kill)\s*\("
         ),
         re.compile(
             r"\bos\.path\.(?:join|realpath|abspath|expanduser|expandvars|"
-            r"normpath|islink|getsize)\s*\("
+            r"normpath|relpath|islink|isabs|getsize)\s*\("
+        ),
+        # pathlib.Path filesystem and path ops (attribute calls; the
+        # object is a path even when the receiver name is not "path")
+        re.compile(
+            r"\.(?:joinpath|resolve|absolute|expanduser|relative_to|"
+            r"read_text|read_bytes|write_text|write_bytes|symlink_to|"
+            r"link_to|hardlink_to|mkdir|rmdir|unlink|rename|replace|"
+            r"chmod|lchmod|touch|stat|lstat)\s*\("
         ),
         re.compile(
             r"\bsubprocess\.(?:run|call|Popen|check_call|check_output|"
@@ -713,13 +721,22 @@ def _cond_tokens(toks):
 
 def _guardish(cond_toks):
     """True when the condition carries a guard cue (comparison, negation,
-    membership, or a check-family call)."""
-    for kind, val in cond_toks:
+    membership, a check-family call, or a member access).
+
+    Member access counts because ``if obj.attr: raise`` inspects a
+    property of the data (``filename.anchor``, ``path.is_symlink``);
+    a bare ``if flag:`` is a toggle, not a guard, and stays dropped.
+    """
+    for i, (kind, val) in enumerate(cond_toks):
         if kind == "op" and val in _GUARD_OPS:
             return True
         if kind == "kw" and val in _GUARD_KWS:
             return True
         if kind == "call" and call_family(val) in _GUARD_CALL_FAMILIES:
+            return True
+        if (kind == "id" and i + 2 < len(cond_toks)
+                and cond_toks[i + 1] == ("op", ".")
+                and cond_toks[i + 2][0] == "id"):
             return True
     return False
 

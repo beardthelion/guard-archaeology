@@ -211,6 +211,32 @@ def handle(p):
     assert recs[0].sink_op == "open("
 
 
+def test_pathlib_path_op_is_a_sink():
+    # gate leg 1 finding: aiohttp's anchor-check guard was dropped
+    # no-sink because pathlib ops were not catalogued
+    text = '''def handle(rel_url):
+    name = Path(rel_url)
+    if name.anchor:
+        raise ValueError("absolute")
+    return root.joinpath(name).resolve()
+'''
+    recs, skips = extract.extract_file("python", "a.py", text, [3, 4])
+    assert len(recs) == 1
+    assert recs[0].sink_function == "handle"
+    assert recs[0].sink_op in (".joinpath(", ".resolve(")
+
+
+def test_pathlib_write_read_text_are_sinks():
+    text = '''def handle(p):
+    if ".." in p:
+        return None
+    return p.write_text(data)
+'''
+    recs, skips = extract.extract_file("python", "a.py", text, [2, 3])
+    assert len(recs) == 1
+    assert recs[0].sink_op == ".write_text("
+
+
 def test_sink_function_attribution_methods():
     text = '''package m
 
