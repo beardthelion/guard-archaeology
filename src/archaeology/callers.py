@@ -101,19 +101,24 @@ _KWARG_RE = re.compile(r"^\s*([A-Za-z_$][\w$]*)\s*=(?![=])")
 _IDENT = re.compile(r"[A-Za-z_$][\w$]*")
 
 
-def _arg_roots(args_text):
-    """Root identifier of each positional/keyword argument, in order."""
+def _arg_names(args_text):
+    """Identifier set of each positional/keyword argument, in order.
+
+    Every identifier in the segment binds to the sink argument, not just
+    the first root: a guard on ``name`` covers ``open(base + '/' + name)``
+    and one on ``f`` covers ``os.path.join(d, f)`` equally. A keyword
+    argument's own name is a parameter name, not data, so it is skipped.
+    """
     roots = []
     for seg in _split_top(args_text):
         seg = seg.strip()
         if not seg:
-            roots.append(None)
+            roots.append(frozenset())
             continue
         kw = _KWARG_RE.match(seg)
         if kw:
             seg = seg[kw.end() :]
-        m = _IDENT.search(seg)
-        roots.append(m.group(0) if m else None)
+        roots.append(frozenset(_IDENT.findall(seg)))
     return roots
 
 
@@ -139,11 +144,11 @@ def _mapped_params(args_text, params, bound_names):
     a guard on any callee input counts as cover (fail-quiet side).
     """
     segs = _split_top(args_text)
-    roots = _arg_roots(args_text)
+    roots = _arg_names(args_text)
     mapped = set()
     for i, seg in enumerate(segs):
-        root = roots[i] if i < len(roots) else None
-        on_path = bound_names is None or (root and root in bound_names)
+        root = roots[i] if i < len(roots) else frozenset()
+        on_path = bound_names is None or bool(root & bound_names)
         if not on_path:
             continue
         kw = _KWARG_RE.match(seg)
@@ -292,9 +297,10 @@ def _callee_guard(repo, sha, cpath, text, lines, masked, lang, funcs,
             args = _call_args(mstmt, cname)
             if args is None:
                 continue
-            roots = _arg_roots(args)
-            if bound_names is not None and roots and not (
-                set(roots) & bound_names
+            roots = _arg_names(args)
+            bound_here = frozenset().union(*roots) if roots else frozenset()
+            if bound_names is not None and bound_here and not (
+                bound_here & bound_names
             ):
                 continue  # callee not on the sink-bound path
             cands = [
@@ -398,7 +404,7 @@ def _sink_args(lines, masked, lang, sink_line, sink_op):
     args = _call_args(mstmt, op_name) if op_name else None
     if args is None:
         return []
-    return [r for r in _arg_roots(args) if r]
+    return sorted(frozenset().union(*_arg_names(args)))
 
 
 # --- the caller corpus --------------------------------------------------------------
@@ -422,11 +428,13 @@ def _find_callers(repo, sha, cpath, cfunc):
     """(callers, ambiguous) bound to one callee at one commit.
 
     callers: (fpath, ftext, flines, fmasked, flang, ffuncs,
-              enclosing FuncRange|None, call_line, arg_roots frozenset)
+              enclosing FuncRange|None, call_line, arg_names frozenset)
     ambiguous: markers for every mention the walk cannot bind,
     getattr/dispatch references, shadowed local defs, unparsable call
-    sites. A candidate file in an unsupported extension is outside the
-    four-language corpus entirely: not evidence either way, so skipped.
+    sites. A grep-matching file in an unsupported extension (.vue,
+    .svelte, .pyx) may hold a caller the corpus cannot examine, so it is
+    an ambiguity that degrades coverage to unprovable, never a silent
+    skip.
     """
     name = cfunc.name
     cand_paths = sorted(gitlog.grep_files(repo, name, sha))
@@ -438,6 +446,7 @@ def _find_callers(repo, sha, cpath, cfunc):
     for fpath in cand_paths:
         flang = shapes.language_for_path(fpath)
         if flang is None:
+            ambiguous.append(f"unsupported-ext:{fpath}")
             continue
         ftext = gitlog.show_file(repo, sha, fpath)
         if ftext is gitlog.NOT_FOUND:
@@ -480,7 +489,7 @@ def _find_callers(repo, sha, cpath, cfunc):
             if args is None:
                 ambiguous.append(f"call-unbound:{fpath}:{i + 1}")
                 continue
-            roots = frozenset(r for r in _arg_roots(args) if r)
+            roots = frozenset().union(*_arg_names(args))
             callers.append(
                 (fpath, ftext, flines, fmasked, flang, ffuncs, enc, i,
                  roots)
@@ -528,6 +537,13 @@ def family_coverage(repo, sha, path, sink_function, sink_op, family, depth):
     if covered:
         return Coverage(COVERED, ("callee-scope",))
     if depth <= 0:
+        # a zero bound still has to count the callers it cannot walk:
+        # any found caller is a scope the bound never examined, which
+        # is unprovable, never absent
+        found, amb = _find_callers(repo, sha, path, fn)
+        ambiguous.extend(amb)
+        if found:
+            ambiguous.append("depth-bound:callers")
         if ambiguous:
             return Coverage(UNPROVABLE, tuple(sorted(set(ambiguous))))
         return Coverage(ABSENT, ("function-scope", "depth-bound"))
@@ -576,3 +592,34 @@ def family_coverage(repo, sha, path, sink_function, sink_op, family, depth):
     if ambiguous:
         return Coverage(UNPROVABLE, tuple(sorted(set(ambiguous))))
     return Coverage(ABSENT, ("caller-chain-exhausted",))
+
+
+# --- locating a recorded sink op --------------------------------------------------
+
+
+def locate_sink_line(text, path, sink_function, sink_op):
+    """0-based line index of the recorded sink op in text, or None.
+
+    Scoped search first: the op must match inside the recorded sink
+    function's FuncRange on masked lines, so a lookalike substring in a
+    comment, a string, or another function cannot anchor it. Falls back
+    to a whole-file masked-op match, then a raw substring match.
+    """
+    if text is None:
+        return None
+    lines = text.splitlines()
+    lang = shapes.language_for_path(path)
+    if lang is not None:
+        funcs = shapes.find_functions(lang, text)
+        fn = locate_function(funcs, sink_function)
+        if fn is not None and fn is not AMBIGUOUS:
+            j = _sink_line(lines, lang, fn, sink_op)
+            if j is not None:
+                return j
+        for i, l in enumerate(lines):
+            if shapes.sink_op(lang, l) == sink_op:
+                return i
+    for i, l in enumerate(lines):
+        if sink_op in l:
+            return i
+    return None

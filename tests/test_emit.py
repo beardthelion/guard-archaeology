@@ -295,6 +295,81 @@ def test_holdout_symlink_escape_ignored(
     assert c["holdout"] is None
 
 
+def test_non_utf8_holdout_warns_and_is_ignored(
+    make_repo, tmp_path, capsys, run_cli, read_jsonl, candidates
+):
+    r = make_repo(REGRESSED_COMMITS)
+    cp = os.path.join(r.root, ".clawpatch")
+    os.makedirs(cp, exist_ok=True)
+    with open(os.path.join(cp, "holdout.jsonl"), "wb") as fh:
+        fh.write(b"\xff\xfe not utf-8\n")
+    out = tmp_path / "a.jsonl"
+    run_cli(r.root, out)
+    assert "unreadable holdout.jsonl" in capsys.readouterr().err
+    c = candidates(read_jsonl(out))[0]
+    assert c["holdout"] is None
+
+
+def test_deeply_nested_holdout_line_warns_and_is_ignored(
+    make_repo, tmp_path, capsys, run_cli, read_jsonl, candidates
+):
+    r = make_repo(REGRESSED_COMMITS)
+    depth = 10000  # deep enough that json.loads raises RecursionError
+    _plant_holdout(r.root, [])
+    path = os.path.join(r.root, ".clawpatch", "holdout.jsonl")
+    with open(path, "w") as fh:
+        fh.write("[" * depth + "]" * depth + "\n")
+    out = tmp_path / "a.jsonl"
+    run_cli(r.root, out)
+    assert "malformed" in capsys.readouterr().err
+    c = candidates(read_jsonl(out))[0]
+    assert c["holdout"] is None
+
+
+def test_row_id_distinguishes_sibling_guards_on_one_sink():
+    # two guards on the same sink from one seed differ only in
+    # signature; the id input includes it
+    a = emit.row_id("bounds", "app.py", "recv", "s" * 40, "sig-a")
+    b = emit.row_id("bounds", "app.py", "recv", "s" * 40, "sig-b")
+    assert a != b
+    assert a == emit.row_id(
+        "bounds", "app.py", "recv", "s" * 40, "sig-a"
+    )
+
+
+def test_boundary_sink_ignores_comment_lookalike(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
+    # a comment mentioning 'open(' far above the sink function must not
+    # anchor the sink line or excerpt
+    commented = (
+        "# do not call open( without checks\n"
+        "\n\n\n\n"
+        + BASE
+    )
+    r = make_repo(
+        [
+            {"files": {"app.py": commented}, "message": "base"},
+            {
+                "files": {
+                    "app.py": (
+                        "# do not call open( without checks\n"
+                        "\n\n\n\n"
+                        + GUARDED
+                    )
+                },
+                "message": SEED_MSG,
+            },
+            {"files": {"app.py": commented}, "message": "refactor"},
+        ]
+    )
+    out = tmp_path / "a.jsonl"
+    run_cli(r.root, out)
+    c = candidates(read_jsonl(out))[0]
+    assert c["sink"]["line"] == 7
+    assert "return open(body).read()" in c["current"]
+
+
 def test_also_md_renders_same_row_set(
     make_repo, tmp_path, run_cli, read_jsonl, candidates
 ):

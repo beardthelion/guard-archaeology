@@ -142,6 +142,16 @@ _REJECT_RES = {
     ),
 }
 
+# Hard rejections: raise/throw/panic/exit, never a bare 'return'. A
+# member-access guard cue ('if cfg.offline: ...') only counts when the
+# body actually rejects, so a feature toggle stays dropped.
+_HARD_REJECT_RES = {
+    lang: tuple(
+        r for r in res if r.pattern != r"\breturn\b"
+    )
+    for lang, res in _REJECT_RES.items()
+}
+
 # Constant-declaration heads; group 1 is the bound name. Python accepts a
 # bare annotated or plain assignment anywhere (module-level or local).
 _DECL_RES = {
@@ -721,25 +731,28 @@ def _cond_tokens(toks):
 
 
 def _guardish(cond_toks):
-    """True when the condition carries a guard cue (comparison, negation,
-    membership, a check-family call, or a member access).
+    """Guard cue in the condition: 'cue', 'member', or None.
 
-    Member access counts because ``if obj.attr: raise`` inspects a
-    property of the data (``filename.anchor``, ``path.is_symlink``);
-    a bare ``if flag:`` is a toggle, not a guard, and stays dropped.
+    Comparisons, negations, membership tests, and check-family calls are
+    unconditional cues. A bare member access (``if obj.attr:``) is a
+    weaker cue: it inspects a property of the data
+    (``filename.anchor``, ``path.is_symlink``) but also matches feature
+    toggles (``if cfg.offline:``), so the caller must additionally
+    require a hard rejection before it classifies.
     """
+    member = False
     for i, (kind, val) in enumerate(cond_toks):
         if kind == "op" and val in _GUARD_OPS:
-            return True
+            return "cue"
         if kind == "kw" and val in _GUARD_KWS:
-            return True
+            return "cue"
         if kind == "call" and call_family(val) in _GUARD_CALL_FAMILIES:
-            return True
+            return "cue"
         if (kind == "id" and i + 2 < len(cond_toks)
                 and cond_toks[i + 1] == ("op", ".")
                 and cond_toks[i + 2][0] == "id"):
-            return True
-    return False
+            member = True
+    return "member" if member else None
 
 
 def _condition_family(cond_toks):
@@ -859,9 +872,17 @@ def classify_statement(lang, stmt_text, const_ctx=False):
         return None
     if toks[0] == ("kw", "if"):
         cond = _cond_tokens(toks)
-        if cond is None or not _guardish(cond):
+        if cond is None:
             return None
-        if not any(r.search(masked) for r in _REJECT_RES[lang]):
+        cue = _guardish(cond)
+        if cue is None:
+            return None
+        reject = (
+            _HARD_REJECT_RES[lang]
+            if cue == "member"
+            else _REJECT_RES[lang]
+        )
+        if not any(r.search(masked) for r in reject):
             return None
         return ("conditional-rejection", _condition_family(cond), {})
     decl = _constant_decl(lang, masked, toks, const_ctx=const_ctx)

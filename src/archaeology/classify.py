@@ -76,14 +76,26 @@ def removal_texts(repo, sha):
     return texts
 
 
-def _deliberate_language(repo, sha, seed_sha):
-    """Deliberate marker when the removal speaks for itself, else None."""
+def _deliberate_language(repo, sha, seed_sha, seed_subject=None):
+    """Deliberate marker when the removal speaks for itself, else None.
+
+    Revert wording only counts when the message references the seed
+    (its SHA, short prefix, or the ``Revert "<seed subject>"`` form);
+    a bare 'revert' word names an intent, not which commit, and cannot
+    mark a removal deliberate.
+    """
     texts = removal_texts(repo, sha)
     short = seed_sha[:7] if seed_sha else None
     for t in texts:
+        refs_seed = (
+            (seed_sha and seed_sha in t)
+            or (short and short in t)
+            or (seed_subject and f'"{seed_subject}"' in t)
+        )
         if _REVERT_RE.search(t):
-            return "revert-language"
-        if seed_sha and (seed_sha in t or (short and short in t)):
+            if refs_seed:
+                return "revert-language"
+        elif refs_seed:
             return "seed-sha"
     for t in texts:
         if _REMOVE_CHECK_RE.search(t):
@@ -152,7 +164,12 @@ def classify_outcome(repo, outcome, caller_depth=2):
             outcome, "unknown", removal_sha=sha, removal_subject=subject,
             evidence=ev + ["seed-unconfirmed"],
         )
-    why = _deliberate_language(repo, sha, rec.seed_sha)
+    seed_subject = None
+    try:
+        seed_subject = gitlog.commit(repo, rec.seed_sha).subject
+    except gitlog.GitError:
+        pass
+    why = _deliberate_language(repo, sha, rec.seed_sha, seed_subject)
     if why:
         return _verdict(
             outcome, "deliberate", removal_sha=sha,
@@ -223,15 +240,22 @@ def classify_outcome(repo, outcome, caller_depth=2):
             evidence=ev + ["sink-unprovable:boundary"],
         )
     if (
-        cov_r.state == callers.ABSENT
-        and cov_b is not None
+        cov_b is not None
         and cov_b.state == callers.ABSENT
+        and cov_r.state in (callers.ABSENT, callers.COVERED)
     ):
+        # the sink is provably unguarded at the boundary: a same-family
+        # replacement that died before the boundary is still a loss
+        # (KTD4), same as a family absent at both commits
+        marker = (
+            "family-absent:removal+boundary"
+            if cov_r.state == callers.ABSENT
+            else "family-absent:boundary"
+        )
         return _verdict(
             outcome, "regressed", removal_sha=sha,
             removal_subject=subject,
-            evidence=ev
-            + ["family-absent:removal+boundary", "sink-present:boundary"],
+            evidence=ev + [marker, "sink-present:boundary"],
         )
     return _verdict(
         outcome, "unknown", removal_sha=sha, removal_subject=subject,

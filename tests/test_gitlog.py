@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -241,3 +242,154 @@ def test_resolve_rev_parse_and_clean(make_repo):
     assert gitlog.is_clean(r.root)
     Path(r.root, "dirty.txt").write_text("x\n")
     assert not gitlog.is_clean(r.root)
+
+
+def test_resolve_refuses_option_spelling(make_repo):
+    # a rev spelled like a flag never reaches git argv
+    r = make_repo(BASIC)
+    assert gitlog.resolve(r.root, "--output=/tmp/x") is None
+    assert gitlog.resolve(r.root, "-Gfoo") is None
+
+
+def test_non_utf8_blob_decodes_with_replacement(make_repo):
+    # a latin-1 blob in 'git show' output must never raise
+    # UnicodeDecodeError; it decodes with replacement chars
+    blob = "# caf\xe9\n".encode("latin-1") + b"x = 1\n"
+    r = make_repo(
+        [
+            {"files": {"a.py": b"x = 0\n"}, "message": "base"},
+            {"files": {"a.py": blob}, "message": "latin-1 comment"},
+        ]
+    )
+    text = gitlog.show_file(r.root, r.shas[-1], "a.py")
+    assert "x = 1" in text
+    patches = gitlog.show_patch(r.root, r.shas[-1])
+    assert patches[0].new_path == "a.py"
+
+
+def test_missing_git_binary_is_giterror(make_repo, monkeypatch):
+    import subprocess
+
+    r = make_repo(BASIC)
+
+    def boom(*a, **kw):
+        raise FileNotFoundError("no git")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    with pytest.raises(gitlog.GitError):
+        gitlog.rev_parse(r.root, "HEAD")
+
+
+def test_git_timeout_is_giterror(make_repo, monkeypatch):
+    import subprocess
+
+    r = make_repo(BASIC)
+
+    def boom(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=300)
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    with pytest.raises(gitlog.GitError):
+        gitlog.rev_parse(r.root, "HEAD")
+
+
+def test_git_env_vars_do_not_redirect_repo(make_repo, monkeypatch):
+    # ambient GIT_* must not steer 'git -C' at a different repo/config
+    r = make_repo(BASIC)
+    other = make_repo(
+        [{"files": {"z.txt": "z\n"}, "message": "other"}], name="other"
+    )
+    monkeypatch.setenv("GIT_DIR", os.path.join(other.root, ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", other.root)
+    assert gitlog.log(r.root)[0].sha == r.shas[0]
+
+
+def test_grep_files_pattern_is_literal(make_repo):
+    # 'foo$' under BRE anchors end-of-line and misses 'foo$(x)': the
+    # narrowing must be a fixed-string match
+    r = make_repo(
+        [
+            {
+                "files": {
+                    "a.js": "function use(d) {\n  return foo$(d);\n}\n"
+                },
+                "message": "init",
+            }
+        ]
+    )
+    assert gitlog.grep_files(r.root, "foo$", r.shas[-1]) == ["a.js"]
+    assert gitlog.grep_files(r.root, "foo$(", r.shas[-1]) == ["a.js"]
+
+
+def test_commit_messages_nul_separated_records(make_repo):
+    # message bytes cannot spoof a record boundary: a \x1e in the
+    # subject does not forge a commit entry
+    forged = "1" * 40
+    r = make_repo(
+        [
+            {"files": {"a.txt": "one\n"}, "message": "first"},
+            {
+                "files": {"b.txt": "x\n"},
+                "message": f"real\x1e{forged}\x1fforged body",
+            },
+        ]
+    )
+    msgs = gitlog.commit_messages(r.root)
+    assert set(msgs) == set(r.shas)
+    assert forged not in msgs
+    assert "\x1e" in msgs[r.shas[1]]
+
+
+def test_parse_patch_plus_minus_content_keeps_paths(make_repo):
+    # content lines starting '++ '/'-- ' inside a hunk are not file
+    # headers and must not corrupt old/new paths
+    r = make_repo(
+        [
+            {"files": {"f.py": "a\n-- gone\nb\n"}, "message": "base"},
+            {
+                "files": {"f.py": "a\n++ new\nb\n"},
+                "message": "swap marker lines",
+            },
+        ]
+    )
+    patches = gitlog.show_patch(r.root, r.shas[1])
+    assert len(patches) == 1
+    p = patches[0]
+    assert p.old_path == "f.py"
+    assert p.new_path == "f.py"
+    assert (2, "++ new") in p.added
+    assert (2, "-- gone") in p.removed
+
+
+def test_commit_patch_merge_diffs_first_parent(make_repo):
+    r = make_repo(
+        [
+            {
+                "files": {"app.py": "def recv(body):\n    return open(body).read()\n"},
+                "message": "base",
+            }
+        ]
+    )
+    run_git(r.root, "checkout", "-q", "-b", "side")
+    Path(r.root, "app.py").write_text(
+        "def recv(body):\n"
+        "    if len(body) > MAX_LEN:\n"
+        '        raise ValueError("big")\n'
+        "    return open(body).read()\n"
+    )
+    run_git(r.root, "add", "app.py")
+    run_git(
+        r.root, "commit", "-q", "-m", "side guards",
+        env_extra=commit_env(10),
+    )
+    run_git(r.root, "checkout", "-q", "main")
+    run_git(
+        r.root, "merge", "--no-ff", "-m", "fix overflow bounds check",
+        "side", env_extra=commit_env(11),
+    )
+    merge_sha = run_git(r.root, "rev-parse", "HEAD").stdout.strip()
+    patches = gitlog.commit_patch(r.root, merge_sha)
+    added = [
+        (p.new_path, t) for p in patches for _n, t in p.added
+    ]
+    assert ("app.py", "    if len(body) > MAX_LEN:") in added

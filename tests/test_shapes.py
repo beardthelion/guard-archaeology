@@ -161,6 +161,36 @@ def test_if_without_guard_cue_not_classified():
     assert shapes.classify_statement("go", stmt) is None
 
 
+def test_member_access_with_bare_return_not_a_guard():
+    # 'if cfg.offline: return' is a feature toggle: the member-access
+    # cue only counts when the body hard-rejects
+    assert (
+        shapes.classify_statement(
+            "python", "if cfg.offline:\n    return None"
+        )
+        is None
+    )
+    assert (
+        shapes.classify_statement(
+            "tsjs", "if (cfg.offline) {\n  return;\n}"
+        )
+        is None
+    )
+
+
+def test_member_access_with_raise_still_classifies():
+    got = shapes.classify_statement(
+        "python", 'if name.anchor:\n    raise ValueError("abs")'
+    )
+    assert got is not None
+    assert got[0] == "conditional-rejection"
+    got = shapes.classify_statement(
+        "tsjs", 'if (cfg.offline) {\n  throw new Error("x");\n}'
+    )
+    assert got is not None
+    assert got[0] == "conditional-rejection"
+
+
 def test_non_guard_call_not_classified():
     assert shapes.classify_statement("python", "result = transform(x)") is None
     assert shapes.classify_statement("tsjs", "renderPage(ctx);") is None

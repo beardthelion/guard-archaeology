@@ -598,3 +598,103 @@ def test_cli_tracked_count_reflects_extraction(make_repo, tmp_path, capsys):
     line = capsys.readouterr().out.strip()
     assert "seeds=1" in line
     assert "tracked=1" in line
+
+
+def test_show_file_failure_is_per_file_error_not_abort(
+    make_repo, monkeypatch
+):
+    # a GitError from show_file inside the per-file loop produces an
+    # error row, not a run abort
+    r = _seeded_repo(make_repo)
+    seed_set = seeds.collect_seeds(r.root)
+
+    def boom(repo, sha, path):
+        raise gitlog.GitError(["git", "show", f"{sha}:{path}"], 128, "boom")
+
+    monkeypatch.setattr(gitlog, "show_file", boom)
+    out = extract.extract_guards(r.root, seed_set)
+    assert out.records == ()
+    assert len(out.errors) == 1
+    assert out.errors[0]["stage"] == "extract"
+    assert out.errors[0]["path"] == "app.py"
+
+
+def test_show_file_failure_cli_still_exits_zero(
+    make_repo, tmp_path, monkeypatch, read_jsonl
+):
+    r = _seeded_repo(make_repo)
+
+    def boom(repo, sha, path):
+        raise gitlog.GitError(["git", "show"], 128, "boom")
+
+    monkeypatch.setattr(gitlog, "show_file", boom)
+    out = tmp_path / "o.jsonl"
+    assert cli.main([r.root, "--out", str(out)]) == 0
+    rows = read_jsonl(out)
+    assert any(
+        row["type"] == "error"
+        and row["stage"] == "extract"
+        and row.get("path") == "app.py"
+        for row in rows
+    )
+
+
+def test_constant_consulted_in_method_resolves_method_qualname():
+    # a class-level constant consulted inside a method attributes the
+    # sink to the method, never the unresolvable class container
+    text = '''class H:
+    MAX = 512
+
+    def run(self, body):
+        if len(body) > H.MAX:
+            raise ValueError("big")
+        return open(body).read()
+'''
+    recs, skips = extract.extract_file("python", "a.py", text, [2])
+    assert len(recs) == 1
+    assert recs[0].shape == "constant-limit"
+    assert recs[0].sink_function == "H.run"
+    assert recs[0].decl_name == "MAX"
+
+
+def test_record_carries_guard_function_and_decl_name():
+    text = '''def recv(body):
+    if len(body) > MAX_LEN:
+        raise ValueError("big")
+    return open(body).read()
+'''
+    recs, _ = extract.extract_file("python", "a.py", text, [2, 3])
+    assert recs[0].guard_function == "recv"
+    assert recs[0].decl_name is None
+
+
+def test_merge_seed_extracts_guard(make_repo):
+    # a merge commit's diff is combined output the patch parser cannot
+    # read; diffing the first parent still yields the guard records
+    from conftest import commit_env, run_git
+    from pathlib import Path
+
+    base = "def recv(body):\n    return open(body).read()\n"
+    guarded = (
+        "def recv(body):\n"
+        "    if len(body) > MAX_LEN:\n"
+        '        raise ValueError("big")\n'
+        "    return open(body).read()\n"
+    )
+    r = make_repo([{"files": {"app.py": base}, "message": "base"}])
+    run_git(r.root, "checkout", "-q", "-b", "side")
+    Path(r.root, "app.py").write_text(guarded)
+    run_git(r.root, "add", "app.py")
+    run_git(
+        r.root, "commit", "-q", "-m", "side", env_extra=commit_env(10)
+    )
+    run_git(r.root, "checkout", "-q", "main")
+    run_git(
+        r.root, "merge", "--no-ff", "-m", "fix overflow bounds check",
+        "side", env_extra=commit_env(11),
+    )
+    seed_set = seeds.collect_seeds(r.root)
+    assert len(seed_set.seeds) == 1
+    out = extract.extract_guards(r.root, seed_set)
+    assert len(out.records) == 1
+    assert out.records[0].sink_function == "recv"

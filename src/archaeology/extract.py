@@ -41,6 +41,8 @@ class GuardRecord:
     sink_op: str  # matched sink operation text
     seed_sha: str
     advisory_id: str | None
+    guard_function: str | None = None  # qualname enclosing the guard
+    decl_name: str | None = None  # bound name of a constant-limit guard
 
 
 @dataclass(frozen=True)
@@ -238,7 +240,13 @@ def _find_constant_sink(lines, lang, funcs, name, decl_line, decl_func):
     membership, or call).
     """
     name_re = shapes._word_re(name)
-    cands = [decl_func] if decl_func is not None else list(funcs)
+    # only function ranges are candidates: a container's qualname (class
+    # H, not method H.run) can never resolve downstream, and a class- or
+    # module-level constant may be consulted in any function
+    if decl_func is not None and decl_func.kind == "func":
+        cands = [decl_func]
+    else:
+        cands = [f for f in funcs if f.kind == "func"]
     for f in sorted(cands, key=lambda f: f.start):
         first_sink = None
         for j in range(f.start, f.end + 1):
@@ -292,16 +300,19 @@ def extract_file(lang, path, text, added_linenos, seed_sha="", advisory_id=None)
         if signature is None:
             skips["unclassified"] += 1
             continue
+        guard_func = _enclosing(funcs, i, kind="func")
+        decl_name = None
         if shape == "constant-limit":
-            decl_func = _enclosing(funcs, i)
+            decl_name = meta["name"]
             sink = _find_constant_sink(
-                lines, lang, funcs, meta["name"], i, decl_func
+                lines, lang, funcs, decl_name, i, guard_func
             )
         else:
-            func = _enclosing(funcs, i)
             sink = None
-            if func is not None:
-                sink = _find_sink(lines, lang, funcs, func, end)
+            if guard_func is not None:
+                sink = _find_sink(
+                    lines, lang, funcs, guard_func, end
+                )
         if sink is None:
             skips["no-sink"] += 1
             continue
@@ -324,6 +335,10 @@ def extract_file(lang, path, text, added_linenos, seed_sha="", advisory_id=None)
                 sink_op=sink_op,
                 seed_sha=seed_sha,
                 advisory_id=advisory_id,
+                guard_function=(
+                    guard_func.qualname if guard_func else None
+                ),
+                decl_name=decl_name,
             )
         )
     return records, skips
@@ -340,7 +355,7 @@ def extract_guards(repo, seed_set):
     errors = []
     for seed in seed_set.seeds:
         try:
-            patches = gitlog.show_patch(repo, seed.sha)
+            patches = gitlog.commit_patch(repo, seed.sha)
         except gitlog.GitError as e:
             errors.append(
                 {"stage": "extract", "seed": seed.sha, "reason": str(e)}
@@ -353,26 +368,39 @@ def extract_guards(repo, seed_set):
             if lang is None or fp.new_path is None:
                 reasons["unsupported"] += 1
                 continue
-            content = gitlog.show_file(repo, seed.sha, fp.new_path)
-            if content is gitlog.NOT_FOUND:
-                reasons["unreadable"] += 1
+            try:
+                content = gitlog.show_file(repo, seed.sha, fp.new_path)
+                if content is gitlog.NOT_FOUND:
+                    reasons["unreadable"] += 1
+                    errors.append(
+                        {
+                            "stage": "extract",
+                            "seed": seed.sha,
+                            "path": fp.new_path,
+                            "reason": "path absent at seed commit",
+                        }
+                    )
+                    continue
+                recs, skips = extract_file(
+                    lang,
+                    fp.new_path,
+                    content,
+                    [n for n, _t in fp.added],
+                    seed_sha=seed.sha,
+                    advisory_id=seed.advisory_id,
+                )
+            except gitlog.GitError as e:
+                # a per-file git failure is one error row, never a run
+                # abort (R13)
                 errors.append(
                     {
                         "stage": "extract",
                         "seed": seed.sha,
                         "path": fp.new_path,
-                        "reason": "path absent at seed commit",
+                        "reason": str(e),
                     }
                 )
                 continue
-            recs, skips = extract_file(
-                lang,
-                fp.new_path,
-                content,
-                [n for n, _t in fp.added],
-                seed_sha=seed.sha,
-                advisory_id=seed.advisory_id,
-            )
             records.extend(recs)
             for k, v in skips.items():
                 reasons[k] += v

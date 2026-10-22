@@ -185,14 +185,16 @@ def test_module_level_guard_covers_module_call(make_repo):
     assert any(d.startswith("module-scope") for d in cov.detail)
 
 
-def test_unsupported_candidate_file_is_not_evidence(make_repo):
-    # a .c file mentioning the name is outside the four-language corpus:
-    # skipped, never a caller and never an ambiguity
+def test_unsupported_candidate_file_is_unprovable(make_repo):
+    # a .vue/.svelte/.c file mentioning the name may hold a caller the
+    # corpus cannot examine: an ambiguity, never claimed absence
     root, sha = _repo(
         make_repo,
         {"app.py": UNGUARDED, "old.c": "int f() { return recv(x); }\n"},
     )
-    assert _cov(root, sha).state == callers.ABSENT
+    cov = _cov(root, sha)
+    assert cov.state == callers.UNPROVABLE
+    assert any(d.startswith("unsupported-ext:") for d in cov.detail)
 
 
 def test_guard_on_unrelated_name_does_not_cover(make_repo):
@@ -208,6 +210,39 @@ def test_guard_on_unrelated_name_does_not_cover(make_repo):
     )
     # the caller's guard binds 'other', not the sink argument
     assert _cov(root, sha).state == callers.ABSENT
+
+
+def test_guard_on_non_root_sink_arg_name_covers(make_repo):
+    # 'name' binds to open(base + '/' + name) as much as 'base' does: a
+    # guard on the non-root identifier still covers the sink path
+    guarded = (
+        "def recv(base, name):\n"
+        "    if '..' in name:\n"
+        "        raise ValueError('bad')\n"
+        "    return open(base + '/' + name).read()\n"
+    )
+    root, sha = _repo(make_repo, {"app.py": guarded})
+    cov = callers.family_coverage(
+        root, sha, "app.py", "recv", "open(", "allowlist", 2
+    )
+    assert cov.state == callers.COVERED
+    assert "function-scope" in cov.detail
+
+
+def test_depth_zero_with_callers_is_unprovable(make_repo):
+    # a zero bound cannot examine the callers it found: unprovable,
+    # never claimed absent
+    root, sha = _repo(
+        make_repo, {"app.py": UNGUARDED, "handlers.py": CALLER_D1}
+    )
+    cov = _cov(root, sha, depth=0)
+    assert cov.state == callers.UNPROVABLE
+    assert "depth-bound:callers" in cov.detail
+
+
+def test_depth_zero_without_callers_is_absent(make_repo):
+    root, sha = _repo(make_repo, {"app.py": UNGUARDED})
+    assert _cov(root, sha, depth=0).state == callers.ABSENT
 
 
 def test_shadowed_def_binds_locally_not_ambiguous(make_repo):

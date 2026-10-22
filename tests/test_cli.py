@@ -126,3 +126,79 @@ def test_rerun_output_byte_identical(make_repo, tmp_path):
     first = out.read_bytes()
     assert cli.main([r.root, "--out", str(out)]) == 0
     assert out.read_bytes() == first
+
+
+def test_until_option_injection_refused(make_repo, tmp_path, capsys):
+    # '--until=--output=...' would smuggle a git flag into the revspec:
+    # rejected before any git call, and no file is created
+    r = make_repo(BASIC)
+    evil = tmp_path / "evil.txt"
+    rc = cli.main([r.root, f"--until=--output={evil}"])
+    assert rc != 0
+    assert not evil.exists()
+    assert "archaeology: stopped:" in capsys.readouterr().err
+
+
+def test_since_option_injection_refused(make_repo, tmp_path):
+    r = make_repo(BASIC)
+    assert cli.main([r.root, "--since=--all"]) != 0
+
+
+def test_unresolvable_since_is_typed_error(make_repo, tmp_path, capsys):
+    r = make_repo(BASIC)
+    rc = cli.main([r.root, "--since", "deadbeef" * 5])
+    assert rc != 0
+    assert "archaeology: stopped:" in capsys.readouterr().err
+
+
+def test_default_out_dir_symlink_escape_refused(
+    make_repo, tmp_path, capsys
+):
+    # .clawpatch -> outside dir must not redirect the default --out write
+    r = make_repo(BASIC)
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    os.symlink(evil, os.path.join(r.root, ".clawpatch"))
+    rc = cli.main([r.root])
+    assert rc != 0
+    assert "escapes target root" in capsys.readouterr().err
+    assert not (evil / "archaeology.jsonl").exists()
+
+
+def test_run_header_reports_skipped(make_repo, tmp_path, read_jsonl):
+    # extraction skips are distinguishable from checked seeds in the
+    # run row: an unclassifiable added statement counts as skipped
+    r = make_repo(
+        [
+            {"files": {"app.py": "x = 1\n"}, "message": "base"},
+            {
+                "files": {"app.py": "x = 1\ny = transform(x)\n"},
+                "message": "fix overflow bounds check",
+            },
+        ]
+    )
+    out = tmp_path / "o.jsonl"
+    assert cli.main([r.root, "--out", str(out)]) == 0
+    hdr = read_jsonl(out)[0]
+    assert hdr["type"] == "run"
+    assert hdr["skipped"] >= 1
+
+
+def test_latin1_blob_run_completes(make_repo, tmp_path, capsys):
+    # a non-UTF-8 blob in git output decodes with replacement; the run
+    # exits zero without a traceback
+    blob = "# caf\xe9\n".encode("latin-1") + (
+        b"def recv(body):\n"
+        b"    if len(body) > MAX_LEN:\n"
+        b"        raise ValueError('big')\n"
+        b"    return open(body).read()\n"
+    )
+    r = make_repo(
+        [
+            {"files": {"app.py": b"x = 1\n"}, "message": "base"},
+            {"files": {"app.py": blob}, "message": "fix overflow bounds check"},
+        ]
+    )
+    out = tmp_path / "o.jsonl"
+    assert cli.main([r.root, "--out", str(out)]) == 0
+    assert "Traceback" not in capsys.readouterr().err

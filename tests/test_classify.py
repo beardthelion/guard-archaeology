@@ -162,6 +162,8 @@ def test_removed_with_sink_file_deleted(make_repo):
 
 
 def test_deliberate_revert_wording_sink_alive(make_repo):
+    # a revert counts deliberate only when it references the seed: the
+    # 'Revert "<seed subject>"' form git itself produces
     r, _e, tr, cl = _classify(
         make_repo,
         [
@@ -169,7 +171,7 @@ def test_deliberate_revert_wording_sink_alive(make_repo):
             {"files": {"app.py": GUARDED}, "message": SEED_MSG},
             {
                 "files": {"app.py": BASE},
-                "message": "revert the bounds check",
+                "message": f'Revert "{SEED_MSG}"',
             },
         ],
     )
@@ -406,6 +408,125 @@ def test_classify_error_degrades_to_unknown(make_repo, monkeypatch):
     assert len(cl.errors) == 1
     assert cl.errors[0]["stage"] == "classify"
     assert cl.verdicts[0].verdict == "unknown"
+
+
+# a same-family replacement that itself dies before the boundary: the
+# sink is provably unguarded at the boundary, which is REGRESSED's
+# definition (KTD4), not UNKNOWN
+REPLACED_BOUNDS = (
+    "def recv(body):\n"
+    "    n = len(body)\n"
+    "    return open(body).read()\n"
+)
+
+
+def test_replacement_that_died_before_boundary_is_regressed(make_repo):
+    r, _e, tr, cl = _classify(
+        make_repo,
+        [
+            {"files": {"app.py": BASE}, "message": "base"},
+            {"files": {"app.py": GUARDED}, "message": SEED_MSG},
+            {"files": {"app.py": REPLACED_BOUNDS}, "message": "refactor"},
+            {"files": {"app.py": BASE}, "message": "cleanup"},
+        ],
+    )
+    assert tr.outcomes[0].status == "candidate"
+    assert tr.outcomes[0].candidate_sha == r.shas[2]
+    v = cl.verdicts[0]
+    assert v.verdict == "regressed"
+    ev = set(v.evidence)
+    assert "coverage:removal=covered" in ev
+    assert "coverage:boundary=absent" in ev
+    assert "family-absent:boundary" in ev
+    assert "sink-present:boundary" in ev
+
+
+def test_bare_revert_word_without_seed_reference_is_regressed(make_repo):
+    # 'revert' wording that does not name the seed is removal language,
+    # not a deliberate marker
+    r, _e, tr, cl = _classify(
+        make_repo,
+        [
+            {"files": {"app.py": BASE}, "message": "base"},
+            {"files": {"app.py": GUARDED}, "message": SEED_MSG},
+            {
+                "files": {"app.py": BASE},
+                "message": "Revert unrelated change",
+            },
+        ],
+    )
+    assert tr.outcomes[0].status == "candidate"
+    v = cl.verdicts[0]
+    assert v.verdict == "regressed"
+
+
+def test_deliberate_wins_over_sink_death(make_repo):
+    # the removal commit kills the sink function and references the
+    # seed in revert wording: deliberate is decided before sink death
+    r, _e, tr, cl = _classify(
+        make_repo,
+        [
+            {"files": {"app.py": BASE}, "message": "base"},
+            {"files": {"app.py": GUARDED}, "message": SEED_MSG},
+            {
+                "files": {"app.py": "def other():\n    return 1\n"},
+                "message": f'Revert "{SEED_MSG}"',
+            },
+        ],
+    )
+    v = cl.verdicts[0]
+    assert v.verdict == "deliberate"
+    assert any(e.startswith("deliberate:") for e in v.evidence)
+
+
+def test_cli_classify_error_row_and_zero_exit(
+    make_repo, tmp_path, capsys, read_jsonl, monkeypatch
+):
+    r = make_repo(
+        [
+            {"files": {"app.py": BASE}, "message": "base"},
+            {"files": {"app.py": GUARDED}, "message": SEED_MSG},
+            {"files": {"app.py": BASE}, "message": "refactor"},
+        ]
+    )
+
+    def boom(*a, **kw):
+        raise gitlog.GitError(["git", "grep"], 128, "boom")
+
+    monkeypatch.setattr(
+        "archaeology.callers.family_coverage", boom
+    )
+    out = tmp_path / "o.jsonl"
+    assert cli.main([r.root, "--out", str(out)]) == 0
+    rows = read_jsonl(out)
+    assert any(
+        row["type"] == "error" and row["stage"] == "classify"
+        for row in rows
+    )
+    line = capsys.readouterr().out.strip()
+    assert "unknown=1" in line
+
+
+def test_non_regressed_verdicts_emit_no_candidate_rows(
+    make_repo, tmp_path, capsys, read_jsonl
+):
+    # a deliberate verdict emits no candidate row, only the header
+    r = make_repo(
+        [
+            {"files": {"app.py": BASE}, "message": "base"},
+            {"files": {"app.py": GUARDED}, "message": SEED_MSG},
+            {
+                "files": {"app.py": BASE},
+                "message": f'Revert "{SEED_MSG}"',
+            },
+        ]
+    )
+    out = tmp_path / "o.jsonl"
+    assert cli.main([r.root, "--out", str(out)]) == 0
+    rows = read_jsonl(out)
+    assert not any(row["type"] == "candidate" for row in rows)
+    line = capsys.readouterr().out.strip()
+    assert "deliberate=1" in line
 
 
 def test_cli_summary_reports_real_verdicts(make_repo, tmp_path, capsys):

@@ -177,6 +177,78 @@ def test_seeds_sorted_by_date_then_sha(make_repo):
     assert keys == sorted(keys)
 
 
+def test_revert_subject_never_seeds_on_verb_term(make_repo):
+    # 'Revert "fix bounds vuln"' carries the fix verb and a security
+    # term but is a removal-classification signal, not a guard origin
+    assert not seeds.message_has_signal('Revert "fix bounds vuln"')
+    assert not seeds.message_has_signal("revert fix security overflow")
+    # an explicit advisory id still seeds a revert commit
+    assert seeds.message_has_signal('Revert "x": CVE-2024-9999')
+    r = make_repo(
+        [
+            {"files": {"a.py": "x = 1\n"}, "message": "work"},
+            {
+                "files": {"b.py": "x = 1\n"},
+                "message": 'Revert "fix traversal guard"',
+            },
+        ]
+    )
+    assert _seeds(r.root).seeds == ()
+
+
+def test_security_ref_seeds_no_per_pair_merge_base(
+    make_repo, monkeypatch
+):
+    # bounders resolve through one batched --merged call per marked ref,
+    # never an is_ancestor subprocess per tag/ref pair
+    from archaeology import gitlog
+
+    monkeypatch.setattr(
+        gitlog,
+        "is_ancestor",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("called")),
+    )
+    r = make_repo(
+        [
+            {"files": {"a.py": "x = 1\n"}, "message": "work a", "tag": "v0.9"},
+            {"files": {"b.py": "x = 1\n"}, "message": "work b"},
+            {
+                "files": {"c.py": "x = 1\n"},
+                "message": "work c",
+                "tag": "v1.0-security",
+            },
+            {"files": {"d.py": "x = 1\n"}, "message": "work d"},
+        ]
+    )
+    ss = _seeds(r.root)
+    assert {s.sha for s in ss.seeds} == {r.shas[1], r.shas[2]}
+
+
+def test_oversized_seeds_file_warns_and_is_ignored(
+    make_repo, tmp_path, capsys
+):
+    r = make_repo(SIGNAL_SCRIPT)
+    f = tmp_path / "seeds.txt"
+    f.write_bytes(b"# " + b"x" * (1024 * 1024) + b"\n")
+    ss = _seeds(r.root, seeds_file=str(f))
+    assert "oversized" in capsys.readouterr().err
+    # only the message-signaled seeds remain
+    assert {s.sha for s in ss.seeds} == {r.shas[1], r.shas[2], r.shas[5]}
+    assert not ss.unresolvable
+
+
+def test_seeds_file_entry_cap(make_repo, tmp_path, capsys):
+    r = make_repo(SIGNAL_SCRIPT)
+    f = tmp_path / "seeds.txt"
+    # a real seed beyond the 10k line cap is dropped with a warning
+    lines = [f"{r.shas[0]}\n"] * 10_000 + [f"{r.shas[4]}\n"]
+    f.write_text("".join(lines))
+    ss = _seeds(r.root, seeds_file=str(f))
+    assert "10000" in capsys.readouterr().err.replace("_", "")
+    by_sha = {s.sha for s in ss.seeds} | {s.sha for s in ss.unresolvable}
+    assert r.shas[4] not in by_sha
+
+
 def test_cli_summary_seed_count(make_repo, tmp_path, capsys):
     r = make_repo(SIGNAL_SCRIPT)
     f = tmp_path / "seeds.txt"

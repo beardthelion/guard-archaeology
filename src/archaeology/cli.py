@@ -29,6 +29,7 @@ class RunCounts:
     removed_with_sink: int = 0
     deliberate: int = 0
     unknown: int = 0
+    skipped: int = 0  # statements dropped at extraction (R5)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,7 +132,28 @@ def run(
     if caller_depth < 0:
         raise ArchaeologyError("--caller-depth must be >= 0")
 
+    # --since/--until reach git argv as revspecs: a value spelled like a
+    # flag could smuggle a git option in (e.g. --until=--output=/path),
+    # so it is rejected before any use and must resolve to a commit
+    for flag, val in (("--since", since), ("--until", until)):
+        if val is None:
+            continue
+        if val.startswith("-"):
+            raise ArchaeologyError(f"{flag} is not a rev: {val}")
+        if gitlog.resolve_commit(real, val) is None:
+            raise ArchaeologyError(f"{flag} does not resolve: {val}")
+
     out_path = out or os.path.join(real, ".clawpatch", "archaeology.jsonl")
+    out_dir = os.path.dirname(os.path.abspath(out_path))
+    if out_dir == real or out_dir.startswith(real + os.sep):
+        # an output path spelled inside the target root must really land
+        # there: a symlinked directory (e.g. .clawpatch -> /tmp/x) must
+        # not redirect the write outside it
+        real_dir = os.path.realpath(out_dir)
+        if real_dir != real and not real_dir.startswith(real + os.sep):
+            raise ArchaeologyError(
+                f"output directory escapes target root: {out_dir}"
+            )
 
     try:
         seed_set = seeds.collect_seeds(
@@ -150,6 +172,7 @@ def run(
     counts = classify_counts(
         seed_set, records, outcomes, classification.verdicts
     )
+    counts.skipped = extraction.skipped
     emap = exposure.load_exposure(real, exposure_file=exposure_file)
     hidx = emit.load_holdout_rows(real)
     rows = emit.build_rows(

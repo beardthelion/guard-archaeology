@@ -27,7 +27,7 @@ import os
 import tempfile
 from dataclasses import asdict, is_dataclass
 
-from . import exposure, gitlog
+from . import callers, exposure, gitlog
 
 _EXCERPT_CTX = 3  # context lines each side of the sink op in "current"
 _MAX_HOLDOUT_BYTES = 16 * 1024 * 1024
@@ -40,12 +40,14 @@ def norm_qualname(name) -> str:
 
 
 def row_id(family: str, sink_path: str, sink_function: str,
-           seed_sha: str) -> str:
+           seed_sha: str, signature: str = "") -> str:
     """archaeology-<family>-<sha10> of (family, sink path, sink function,
-    seed SHA); stable across re-runs (KTD10)."""
+    seed SHA, guard signature); stable across re-runs (KTD10). The
+    signature rides in the key so two guards on one sink from one seed
+    cannot collide."""
     key = "|".join(
         [family or "", sink_path or "", sink_function or "",
-         seed_sha or ""]
+         seed_sha or "", signature or ""]
     )
     digest = hashlib.sha256(key.encode()).hexdigest()[:10]
     return f"archaeology-{family}-{digest}"
@@ -73,7 +75,9 @@ def load_holdout_rows(repo_root: str) -> dict:
             return {}
         with open(path, "r", encoding="utf-8") as fh:
             text = fh.read()
-    except OSError as e:
+    except (OSError, ValueError, RecursionError) as e:
+        # UnicodeDecodeError is a ValueError; an unreadable or non-text
+        # file warns and is ignored (KTD11)
         exposure._warn(f"ignoring unreadable holdout.jsonl: {e}")
         return {}
     idx = {}
@@ -83,7 +87,7 @@ def load_holdout_rows(repo_root: str) -> dict:
             continue
         try:
             row = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             bad += 1
             continue
         if not isinstance(row, dict) or row.get("type") != "candidate":
@@ -128,12 +132,15 @@ def _boundary_sink(repo, outcome):
             text = got
     if text is None:
         return None, outcome.boundary_excerpt
-    lines = text.splitlines()
-    for i, l in enumerate(lines):
-        if rec.sink_op in l:
-            lo = max(0, i - _EXCERPT_CTX)
-            excerpt = "\n".join(lines[lo : i + _EXCERPT_CTX + 1])
-            return i + 1, excerpt
+    i = callers.locate_sink_line(
+        text, outcome.boundary_path or rec.sink_path,
+        rec.sink_function, rec.sink_op,
+    )
+    if i is not None:
+        lines = text.splitlines()
+        lo = max(0, i - _EXCERPT_CTX)
+        excerpt = "\n".join(lines[lo : i + _EXCERPT_CTX + 1])
+        return i + 1, excerpt
     return None, outcome.boundary_excerpt
 
 
@@ -153,8 +160,10 @@ def candidate_row(repo, verdict, emap, hidx) -> dict:
     )
     return {
         "type": "candidate",
-        "id": row_id(rec.family, sink_path, rec.sink_function,
-                     rec.seed_sha),
+        "id": row_id(
+            rec.family, sink_path, rec.sink_function, rec.seed_sha,
+            rec.signature,
+        ),
         "family": rec.family,
         "sink": {
             "path": sink_path,
@@ -196,7 +205,10 @@ def _candidate_sort_key(repo, verdict):
         date,
         sink_path,
         rec.seed_sha or "",
-        row_id(rec.family, sink_path, rec.sink_function, rec.seed_sha),
+        row_id(
+            rec.family, sink_path, rec.sink_function, rec.seed_sha,
+            rec.signature,
+        ),
     )
 
 

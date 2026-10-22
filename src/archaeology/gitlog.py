@@ -69,18 +69,43 @@ class FilePatch:
     new_mode: str | None = None
 
 
+GIT_TIMEOUT = 300  # seconds; a wedged git call degrades to GitError
+
+
 def _env():
-    env = dict(os.environ)
+    # GIT_* variables (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
+    # GIT_OBJECT_DIRECTORY, GIT_CONFIG*) would redirect 'git -C' to a
+    # different repository or config, so they never pass through.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["LC_ALL"] = "C"
     return env
 
 
 def _run_rc(repo, argv):
-    """Run git, returning (stdout, returncode, stderr) without raising."""
+    """Run git, returning (stdout, returncode, stderr) without raising.
+
+    errors='replace' keeps a non-UTF-8 blob in 'git show' output from
+    escaping as UnicodeDecodeError; stdin is devnull and the call is
+    time-bounded so a repo cannot hang or prompt the pipeline. A missing
+    git binary or a timeout raises GitError like any other failed call.
+    """
     full = ["git", "-C", str(repo), *[str(a) for a in argv]]
-    proc = subprocess.run(
-        full, env=_env(), capture_output=True, text=True
-    )
+    try:
+        proc = subprocess.run(
+            full,
+            env=_env(),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=GIT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise GitError(
+            full, "timeout", f"timed out after {e.timeout}s"
+        )
+    except OSError as e:
+        raise GitError(full, 127, f"git not found: {e}")
     return proc.stdout, proc.returncode, proc.stderr, full
 
 
@@ -100,8 +125,16 @@ def rev_parse(repo, rev):
 
 
 def resolve(repo, rev):
-    """Resolve a rev to a SHA, or None when it does not resolve."""
-    out, rc, _err, _full = _run_rc(repo, ["rev-parse", "--verify", rev])
+    """Resolve a rev to a SHA, or None when it does not resolve.
+
+    A rev spelled like an option is refused up front: it must never
+    reach git argv where it could act as a flag.
+    """
+    if not rev or str(rev).startswith("-"):
+        return None
+    out, rc, _err, _full = _run_rc(
+        repo, ["rev-parse", "--verify", "--end-of-options", rev]
+    )
     if rc != 0:
         return None
     return out.strip()
@@ -139,7 +172,7 @@ def is_ancestor(repo, ancestor, descendant):
 
 def rev_list(repo, include, exclude=None):
     """SHAs reachable from include but not from any exclude rev."""
-    argv = ["rev-list", include]
+    argv = ["rev-list", "--end-of-options", include]
     for e in exclude or ():
         argv.append(f"^{e}")
     out = _run(repo, argv)
@@ -156,6 +189,14 @@ def for_each_ref(repo, *patterns):
             name, obj = line.split("\t", 1)
             refs.append((name, obj))
     return refs
+
+
+def merged_ref_names(repo, rev):
+    """Set of refnames whose targets are ancestors of rev, one call."""
+    out = _run(
+        repo, ["for-each-ref", "--merged", rev, "--format=%(refname)"]
+    )
+    return {l.strip() for l in out.splitlines() if l.strip()}
 
 
 # --- commit enumeration -----------------------------------------------------
@@ -185,7 +226,7 @@ def log(repo, until=None, since=None, paths=None):
     if until is None and resolve(repo, "HEAD") is None:
         return []  # unborn HEAD: a repo with zero commits has an empty window
     spec = f"{since}..{rev}" if since else rev
-    argv = ["log", f"--format={_FMT}", spec]
+    argv = ["log", f"--format={_FMT}", "--end-of-options", spec]
     if paths:
         argv += ["--", *paths]
     out, rc, err, full = _run_rc(repo, argv)
@@ -207,24 +248,30 @@ def commit_message(repo, sha):
     return _run(repo, ["log", "-1", "--format=%B", sha]).rstrip("\n")
 
 
+_SHA_RE = re.compile(r"[0-9a-f]{5,40}")
+
+
 def commit_messages(repo, until=None, since=None):
     """{sha: full message} for the bounded window, in one git call.
 
-    Same rev bounds as log(); each record parses as
-    ``\\x1e<sha>\\x1f<message>``.
+    Same rev bounds as log(). Records split on NUL, which git refuses to
+    store in a commit message, so message bytes cannot spoof a record
+    boundary (an \\x1e/\\x1f separator could be forged by commit text).
     """
     rev = until or "HEAD"
     if until is None and resolve(repo, "HEAD") is None:
         return {}  # unborn HEAD: a repo with zero commits
     spec = f"{since}..{rev}" if since else rev
-    out = _run(repo, ["log", "--format=%x1e%H%x1f%B", spec])
+    out = _run(
+        repo, ["log", "--format=%H%x00%B%x00", "--end-of-options", spec]
+    )
     messages = {}
-    for rec in out.split("\x1e"):
-        sha, _sep, msg = rec.partition("\x1f")
-        sha = sha.strip()
-        if not sha:
-            continue
-        messages[sha] = msg.rstrip("\n")
+    parts = out.split("\x00")
+    for i in range(0, len(parts) - 1, 2):
+        sha = parts[i].strip()
+        if not _SHA_RE.fullmatch(sha):
+            continue  # not a record head: corrupt or empty segment
+        messages[sha] = parts[i + 1].rstrip("\n")
     return messages
 
 
@@ -266,8 +313,15 @@ def ls_tree(repo, sha):
 
 
 def grep_files(repo, pattern, sha):
-    """Paths under sha whose content matches pattern ([] when none match)."""
-    out, rc, err, full = _run_rc(repo, ["grep", "-l", "-e", pattern, sha])
+    """Paths under sha whose content contains pattern ([] when none).
+
+    The pattern is a fixed string (-F): callers narrow on identifier
+    names, and a regex metachar in the name (a '$'-suffixed JS function
+    anchors end-of-line under BRE) would silently miss real callers.
+    """
+    out, rc, err, full = _run_rc(
+        repo, ["grep", "-l", "-F", "-e", pattern, sha]
+    )
     if rc == 1:
         return []
     if rc != 0:
@@ -382,9 +436,11 @@ def parse_patch_text(text):
             "GIT binary patch"
         ):
             cur["is_binary"] = True
-        elif line.startswith("--- "):
+        elif not in_hunk and line.startswith("--- "):
+            # '--- '/'+++ ' are file headers only before the first hunk;
+            # inside a hunk they are removed/added content lines
             cur["old_path"] = _unquote(line[4:])
-        elif line.startswith("+++ "):
+        elif not in_hunk and line.startswith("+++ "):
             cur["new_path"] = _unquote(line[4:])
         else:
             m = _HUNK_RE.match(line)
@@ -417,6 +473,20 @@ def show_patch(repo, sha):
     return parse_patch_text(out)
 
 
+def commit_patch(repo, sha):
+    """Per-file FilePatches for a commit, merge-aware.
+
+    'git show' renders a merge's diff as combined (--cc) output that
+    parse_patch_text cannot read, so a merge diffs against its first
+    parent instead: the change the merge brought onto the mainline.
+    """
+    c = commit(repo, sha)
+    if len(c.parents) > 1:
+        out = _run(repo, ["diff", "-M", c.parents[0], sha])
+        return parse_patch_text(out)
+    return show_patch(repo, sha)
+
+
 # --- pickaxe and lineage ------------------------------------------------------
 
 def pickaxe(repo, query, paths=None, until=None, since=None,
@@ -432,7 +502,10 @@ def pickaxe(repo, query, paths=None, until=None, since=None,
     flag = f"-S{query}" if fixed_string else f"-G{query}"
     rev = until or "HEAD"
     spec = f"{since}..{rev}" if since else rev
-    argv = ["log", "--full-history", flag, "--format=%H", spec]
+    argv = [
+        "log", "--full-history", flag, "--format=%H",
+        "--end-of-options", spec,
+    ]
     if topo:
         argv.insert(2, "--topo-order")
     if paths:
@@ -452,7 +525,7 @@ def path_events(repo, path, until=None):
     """
     argv = [
         "log", "--full-history", "--name-status", "-M", "--format=%H",
-        until or "HEAD", "--", path,
+        "--end-of-options", until or "HEAD", "--", path,
     ]
     out = _run(repo, argv)
     events = []
@@ -497,7 +570,7 @@ def rename_lineage(repo, path, until=None):
     """
     argv = [
         "log", "--follow", "--name-status", "-M", "--format=%H",
-        until or "HEAD", "--", path,
+        "--end-of-options", until or "HEAD", "--", path,
     ]
     out = _run(repo, argv)
     lineage = [path]

@@ -430,6 +430,128 @@ def test_cli_intact_count_and_no_candidates(
     assert not any(row["type"] == "candidate" for row in rows)
 
 
+# identical guards in two functions: removing the tracked one must not
+# be masked by the sibling's copy
+DUP_BASE = (
+    "def a(body):\n"
+    "    return open(body).read()\n\n"
+    "def b(body):\n"
+    "    if len(body) > MAX_LEN:\n"
+    '        raise ValueError("big")\n'
+    "    return open(body).read()\n"
+)
+DUP_SEEDED = (
+    "def a(body):\n"
+    "    if len(body) > MAX_LEN:\n"
+    '        raise ValueError("big")\n'
+    "    return open(body).read()\n\n"
+    "def b(body):\n"
+    "    if len(body) > MAX_LEN:\n"
+    '        raise ValueError("big")\n'
+    "    return open(body).read()\n"
+)
+
+
+def test_same_signature_guard_in_other_function_does_not_mask_removal(
+    make_repo,
+):
+    # the guard added to a() is removed while b() keeps its identical
+    # copy: presence is scoped to the recorded function, so the removal
+    # is a candidate, not INTACT
+    r, ext, tr = _track(
+        make_repo,
+        [
+            {"files": {"app.py": DUP_BASE}, "message": "base"},
+            {"files": {"app.py": DUP_SEEDED}, "message": SEED_MSG},
+            {"files": {"app.py": DUP_BASE}, "message": "refactor"},
+        ],
+    )
+    assert ext.records[0].guard_function == "a"
+    out = tr.outcomes[0]
+    assert out.status == "candidate"
+    assert out.candidate_sha == r.shas[2]
+
+
+# a constant-limit guard removed while other numeric assignments remain:
+# the ID=NUM skeleton alone must not keep it INTACT
+CONST_BASE = (
+    "LIMIT = 64\n\n"
+    "def recv(body):\n"
+    "    if len(body) > MAX_UPLOAD:\n"
+    '        raise ValueError("big")\n'
+    "    return open(body).read()\n"
+)
+CONST_SEEDED = (
+    "LIMIT = 64\n"
+    "MAX_UPLOAD = 512\n\n"
+    "def recv(body):\n"
+    "    if len(body) > MAX_UPLOAD:\n"
+    '        raise ValueError("big")\n'
+    "    return open(body).read()\n"
+)
+
+
+def test_constant_limit_binds_declared_name(make_repo):
+    r, ext, tr = _track(
+        make_repo,
+        [
+            {"files": {"app.py": CONST_BASE}, "message": "base"},
+            {"files": {"app.py": CONST_SEEDED}, "message": SEED_MSG},
+            {"files": {"app.py": CONST_BASE}, "message": "refactor"},
+        ],
+    )
+    assert ext.records[0].shape == "constant-limit"
+    assert ext.records[0].decl_name == "MAX_UPLOAD"
+    out = tr.outcomes[0]
+    assert out.status == "candidate"
+    assert out.candidate_sha == r.shas[2]
+
+
+def test_candidate_then_delete_recreate_is_severed(make_repo):
+    # a verified removal at C2 followed by a delete+recreate at C3/C4:
+    # the identity the candidate was proven against is gone, so the
+    # outcome severs rather than emitting candidate -> REGRESSED
+    r, ext, tr = _track(
+        make_repo,
+        [
+            {"files": {"app.py": BASE}, "message": "base"},
+            {"files": {"app.py": GUARDED}, "message": SEED_MSG},
+            {"files": {"app.py": BASE}, "message": "refactor"},
+            {"deletions": ["app.py"], "message": "drop app.py"},
+            {"files": {"app.py": FRESH}, "message": "re-add app.py"},
+        ],
+    )
+    out = tr.outcomes[0]
+    assert out.status == "severed"
+    assert out.lineage_break is not None
+    assert out.lineage_break.kind == "delete-recreate"
+    assert out.candidate_sha == r.shas[2]
+
+
+def test_boundary_excerpt_anchors_on_sink_function(make_repo):
+    # a lookalike 'open(' substring in a comment above the function must
+    # not anchor the excerpt; the recorded op inside the function wins
+    text = (
+        "# never call open( without the bounds check\n"
+        "\n\n\n\n"
+        "def recv(body):\n"
+        "    if len(body) > MAX_LEN:\n"
+        '        raise ValueError("big")\n'
+        "    return open(body).read()\n"
+    )
+    base = "# never call open( without the bounds check\n\n\n\n\n" + BASE
+    r, ext, tr = _track(
+        make_repo,
+        [
+            {"files": {"app.py": base}, "message": "base"},
+            {"files": {"app.py": text}, "message": SEED_MSG},
+        ],
+    )
+    out = tr.outcomes[0]
+    assert out.status == "intact"
+    assert "return open(body).read()" in out.boundary_excerpt
+
+
 def test_cli_track_error_row(make_repo, tmp_path, capsys, read_jsonl,
                              monkeypatch):
     r = make_repo(

@@ -7,10 +7,14 @@ security-marked ref become guard origins.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 
-from . import gitlog
+from . import exposure, gitlog
+
+_MAX_SEEDS_BYTES = 1024 * 1024
+_MAX_SEEDS_LINES = 10_000
 
 CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
 GHSA_RE = re.compile(r"\bGHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}\b",
@@ -61,12 +65,22 @@ class SeedSet:
     unresolvable: tuple  # Seed records for seeds-file entries that did not resolve
 
 
+_REVERT_SUBJECT_RE = re.compile(r"\s*revert\b", re.IGNORECASE)
+
+
 def message_has_signal(subject, body=""):
-    """True when the commit message carries a security signal."""
+    """True when the commit message carries a security signal.
+
+    A 'Revert ...' subject never seeds on the fix-verb x security-term
+    signal: revert-of-fix is a removal-classification signal, not a
+    guard origin. An explicit CVE/GHSA id still seeds.
+    """
     if CVE_RE.search(subject) or GHSA_RE.search(subject):
         return True
     if body and (CVE_RE.search(body) or GHSA_RE.search(body)):
         return True
+    if _REVERT_SUBJECT_RE.match(subject):
+        return False
     return bool(FIX_VERB_RE.search(subject) and SEC_TERM_RE.search(subject))
 
 
@@ -85,12 +99,22 @@ def parse_seeds_file(text):
 
 def _read_seeds_file(path):
     try:
+        if os.path.getsize(path) > _MAX_SEEDS_BYTES:
+            exposure._warn(f"ignoring oversized seeds file {path}")
+            return ""
         with open(path, encoding="utf-8") as fh:
-            return fh.read()
+            text = fh.read()
     except OSError as e:
         raise SeedsError(f"cannot read seeds file {path}: {e}")
     except UnicodeDecodeError as e:
         raise SeedsError(f"seeds file {path} is not text: {e}")
+    lines = text.splitlines(keepends=True)
+    if len(lines) > _MAX_SEEDS_LINES:
+        exposure._warn(
+            f"seeds file {path}: using first {_MAX_SEEDS_LINES} lines"
+        )
+        text = "".join(lines[:_MAX_SEEDS_LINES])
+    return text
 
 
 def _security_ref_seeds(repo, window):
@@ -119,16 +143,18 @@ def _security_ref_seeds(repo, window):
         target = targets[name]
         if target is None or target not in window:
             continue
+        # one batched call resolves every ref merged into the target
+        # instead of a merge-base subprocess per tag/ref pair
+        merged = gitlog.merged_ref_names(repo, target)
         bounders = [
             t
             for ref_name, t in tag_targets.items()
-            if ref_name != name and t != target
-            and gitlog.is_ancestor(repo, t, target)
+            if ref_name != name and t != target and ref_name in merged
         ]
         for other, t in targets.items():
             if other == name:
                 continue
-            if t and t != target and gitlog.is_ancestor(repo, t, target):
+            if t and t != target and other in merged:
                 bounders.append(t)
         if bounders:
             shas = gitlog.rev_list(repo, target, exclude=bounders)

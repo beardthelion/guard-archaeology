@@ -55,7 +55,9 @@ def _load_map(path: str) -> dict:
             data = json.load(fh)
     except ExposureError:
         raise
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, ValueError, RecursionError) as e:
+        # JSONDecodeError and UnicodeDecodeError are ValueErrors; a
+        # pathological nesting depth is a RecursionError (KTD11)
         raise ExposureError(f"cannot read exposure file {path}: {e}")
     if not isinstance(data, dict):
         raise ExposureError(f"exposure file {path} is not a JSON object")
@@ -77,7 +79,7 @@ def _parse_scope_boundary(path: str) -> dict:
             raise ValueError("scope-boundary.md oversized")
         with open(path, "r", encoding="utf-8") as fh:
             text = fh.read()
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         _warn(f"ignoring unreadable scope-boundary.md: {e}")
         return {}
     out = {}

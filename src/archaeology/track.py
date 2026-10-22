@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import extract, gitlog, shapes
+from . import callers, extract, gitlog, shapes
 
 
 @dataclass(frozen=True)
@@ -86,21 +86,67 @@ class Tracking:
 # --- presence checking ---------------------------------------------------------
 
 
-def _signature_present(lang, text, signature):
-    """True when some statement in text normalizes to signature.
+def _guard_scope(lang, text, rec):
+    """Line range the signature must be found in, or None for whole file.
+
+    Presence is scoped to the recorded guard function's FuncRange so a
+    same-signature guard living in a different function cannot keep a
+    removed guard INTACT. The recorded qualname matches first, then a
+    unique basename; a function that cannot be located (renamed, moved)
+    falls back to the whole file.
+    """
+    funcs = shapes.find_functions(lang, text)
+    name = rec.guard_function
+    if name:
+        exact = [f for f in funcs if f.qualname == name]
+        if exact:
+            return exact[0].start, exact[0].end
+        base = shapes.basename(name)
+        matches = [f for f in funcs if f.kind == "func" and f.name == base]
+        if len(matches) == 1:
+            return matches[0].start, matches[0].end
+        if len(matches) > 1:
+            return None
+    return None
+
+
+def _decl_name_of(lang, stmt):
+    """Bound name when the statement is a literal constant decl."""
+    masked = shapes.mask_code(stmt, lang)
+    toks = shapes._lex(stmt, lang)
+    if not toks:
+        return None
+    decl = shapes._constant_decl(
+        lang, masked, toks, const_ctx=(lang == "go")
+    )
+    return decl[0] if decl else None
+
+
+def _signature_present(lang, text, rec):
+    """True when the guard's signature holds in its recorded scope.
 
     Statement completion reuses the extractor's segmentation so a
     signature only counts as present under the same segmentation it was
     extracted with; whitespace and line joins still collapse (KTD1).
+    A constant-limit record also binds its declared name: ``ID=NUM``
+    matches every numeric assignment in scope, so only a decl of
+    ``rec.decl_name`` counts.
     """
     lines = text.splitlines()
     masked = [shapes.mask_code(l, lang) for l in lines]
-    for i, mline in enumerate(masked):
-        if not mline.strip():
+    scope = _guard_scope(lang, text, rec)
+    lo, hi = scope if scope else (0, len(lines) - 1)
+    for i in range(lo, hi + 1):
+        if not masked[i].strip():
             continue
         stmt, _end = extract._complete_statement(lang, lines, masked, i)
-        if shapes.normalize_statement(lang, stmt) == signature:
-            return True
+        if shapes.normalize_statement(lang, stmt) != rec.signature:
+            continue
+        if rec.decl_name is not None and (
+            _decl_name_of(lang, stmt) != rec.decl_name
+        ):
+            continue
+        return True
     return False
 
 
@@ -174,16 +220,22 @@ def _path_at(renames, rec_path, repo, sha):
     return active
 
 
-def _excerpt(text, needle):
-    """A few lines around the first line containing needle, or None."""
+def _excerpt(text, path, sink_function, needle):
+    """A few lines around the sink op, or None.
+
+    The op is located inside the recorded sink function's FuncRange on
+    masked lines first, so a matching substring in a comment or string
+    cannot anchor the excerpt; whole-file masked and raw substring
+    matching are the ordered fallbacks.
+    """
     if text is None:
         return None
+    i = callers.locate_sink_line(text, path, sink_function, needle)
+    if i is None:
+        return None
     lines = text.splitlines()
-    for i, l in enumerate(lines):
-        if needle in l:
-            lo = max(0, i - 3)
-            return "\n".join(lines[lo : i + 4])
-    return None
+    lo = max(0, i - 3)
+    return "\n".join(lines[lo : i + 4])
 
 
 def _outcome(rec, boundary, status, chain, renames, brk, markers,
@@ -234,9 +286,7 @@ def track_guard(repo, rec, boundary):
             text = cache[key]
             if text is gitlog.NOT_FOUND:
                 continue
-            return name, _signature_present(
-                lang, text, rec.signature
-            ), text
+            return name, _signature_present(lang, text, rec), text
         return None, False, None
 
     # add-commit confirmation: the guard must verify at its own seed
@@ -276,12 +326,22 @@ def track_guard(repo, rec, boundary):
 
     bname, bpresent, btext = present_at(boundary)
     boundary_present = bname is not None
-    excerpt = _excerpt(btext, rec.sink_op) if btext else None
+    excerpt = (
+        _excerpt(btext, bname, rec.sink_function, rec.sink_op)
+        if btext
+        else None
+    )
 
-    if candidate is not None:
+    if brk is not None and brk.kind != "delete":
+        # a non-delete identity reset (delete-recreate, rename-reset,
+        # delete-superseded) severs lineage even when a verified removal
+        # candidate was found earlier in the window: the candidate was
+        # proven against a file identity that no longer exists
+        status = "severed"
+    elif candidate is not None:
         status = "candidate"
     elif brk is not None:
-        status = "deleted" if brk.kind == "delete" else "severed"
+        status = "deleted"
     elif not boundary_present:
         markers.append("boundary-missing")
         status = "unverifiable"
@@ -293,7 +353,7 @@ def track_guard(repo, rec, boundary):
 
     return _outcome(
         rec, boundary, status, chain, renames, brk, markers, mutations,
-        candidate, parent_sha, chain[-1] if boundary_present else None,
+        candidate, parent_sha, bname if boundary_present else None,
         boundary_present, excerpt, add_confirmed,
     )
 
