@@ -90,7 +90,7 @@ DISPATCH = (
     "    return getattr(app, 'recv')(data)\n"
 )
 
-SEED_MSG = "fix overflow bounds check"
+SEED_MSG = "fix overflow bounds check CVE-2024-42424"
 
 
 def _classify(make_repo, commits, depth=2, until=None):
@@ -548,7 +548,7 @@ def test_cli_summary_reports_real_verdicts(make_repo, tmp_path, capsys):
             {"files": {"app.py": GUARDED}, "message": SEED_MSG},
             {
                 "files": {"b.py": other_guarded},
-                "message": "fix command injection vuln",
+                "message": "fix command injection vuln CVE-2024-42425",
             },
             {"files": {"app.py": BASE}, "message": "refactor"},
         ]

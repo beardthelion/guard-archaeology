@@ -55,7 +55,10 @@ class Extraction:
     errors: tuple  # per-seed/per-file failures for R13 error rows
 
 
-_SKIP_REASONS = ("unclassified", "no-sink", "unsupported", "unreadable")
+_SKIP_REASONS = (
+    "unclassified", "no-sink", "unsupported", "unreadable",
+    "ignored", "oversized",
+)
 
 _CONTINUATION_TAIL = re.compile(r"(,|\\|&&|\|\||\?|:|=|\||&|\^|\.)\s*$")
 _CONTROL_HEAD = re.compile(
@@ -368,8 +371,14 @@ def extract_guards(repo, seed_set):
             if lang is None or fp.new_path is None:
                 reasons["unsupported"] += 1
                 continue
+            if shapes.is_ignored_path(fp.new_path):
+                # vendored/environment code carries no first-party guard
+                reasons["ignored"] += 1
+                continue
             try:
-                content = gitlog.show_file(repo, seed.sha, fp.new_path)
+                content = gitlog.show_file_cached(
+                    repo, seed.sha, fp.new_path
+                )
                 if content is gitlog.NOT_FOUND:
                     reasons["unreadable"] += 1
                     errors.append(
@@ -380,6 +389,9 @@ def extract_guards(repo, seed_set):
                             "reason": "path absent at seed commit",
                         }
                     )
+                    continue
+                if len(content) > gitlog.MAX_BLOB_BYTES:
+                    reasons["oversized"] += 1
                     continue
                 recs, skips = extract_file(
                     lang,

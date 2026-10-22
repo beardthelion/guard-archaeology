@@ -198,7 +198,7 @@ def _forward_lineage(repo, rec, boundary):
             brk = LineageBreak("rename-reset", decisive[0], current)
         elif dels:
             gone = (
-                gitlog.show_file(repo, boundary, current)
+                gitlog.show_file_cached(repo, boundary, current)
                 is gitlog.NOT_FOUND
             )
             # a delete whose name still resolves at the boundary was
@@ -282,7 +282,8 @@ def track_guard(repo, rec, boundary):
         for name in order:
             key = (sha, name)
             if key not in cache:
-                cache[key] = gitlog.show_file(repo, sha, name)
+                # the shared blob cache dedups this read across guards
+                cache[key] = gitlog.show_file_cached(repo, sha, name)
             text = cache[key]
             if text is gitlog.NOT_FOUND:
                 continue

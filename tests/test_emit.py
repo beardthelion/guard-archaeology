@@ -14,7 +14,7 @@ GUARDED = (
     '        raise ValueError("big")\n'
     "    return open(body).read()\n"
 )
-SEED_MSG = "fix overflow bounds check"
+SEED_MSG = "fix overflow bounds check CVE-2024-42424"
 
 REGRESSED_COMMITS = [
     {"files": {"app.py": BASE}, "message": "base"},
@@ -119,7 +119,7 @@ def test_candidates_sorted_by_removal_date(
             {"files": {"app.py": GUARDED}, "message": SEED_MSG},
             {
                 "files": {"b.py": B2_GUARDED},
-                "message": "fix command injection vuln",
+                "message": "fix command injection vuln CVE-2024-42425",
             },
             {"files": {"b.py": B2_BASE}, "message": "cleanup b"},
             {"files": {"app.py": BASE}, "message": "refactor"},
@@ -390,3 +390,99 @@ def test_also_md_renders_same_row_set(
     assert loc in md
     assert f"## {c['family']}" in md
     assert c["removal"]["sha"] in md
+
+
+TBASE = "def t(body):\n    return open(body).read()\n"
+TGUARDED = (
+    "def t(body):\n"
+    "    if len(body) > MAX_LEN:\n"
+    '        raise ValueError("big")\n'
+    "    return open(body).read()\n"
+)
+ASSERT_GUARDED = (
+    "def recv(body):\n"
+    "    assert_len(body, MAX_LEN)\n"
+    "    return open(body).read()\n"
+)
+
+
+def test_test_path_sink_produces_no_candidate(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates, capsys
+):
+    # the seed also touches app.py, so the test-only seed drop does not
+    # remove it; extraction still records the test-file guard, but
+    # emission filters it and the header reports regressed=0
+    r = make_repo(
+        [
+            {
+                "files": {"app.py": BASE, "tests/test_recv.py": TBASE},
+                "message": "base",
+            },
+            {
+                "files": {
+                    "app.py": "# a note\n" + BASE,
+                    "tests/test_recv.py": TGUARDED,
+                },
+                "message": SEED_MSG,
+            },
+            {
+                "files": {"app.py": BASE, "tests/test_recv.py": TBASE},
+                "message": "refactor",
+            },
+        ]
+    )
+    out = tmp_path / "a.jsonl"
+    run_cli(r.root, out)
+    rows = read_jsonl(out)
+    hdr = rows[0]
+    assert hdr["tracked"] == 1
+    assert hdr["regressed"] == 0
+    assert candidates(rows) == []
+    assert "regressed=0" in capsys.readouterr().out
+
+
+def test_mixed_test_and_code_sinks_emit_only_code_candidate(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
+    r = make_repo(
+        [
+            {
+                "files": {"app.py": BASE, "tests/test_recv.py": TBASE},
+                "message": "base",
+            },
+            {
+                "files": {"app.py": GUARDED, "tests/test_recv.py": TGUARDED},
+                "message": SEED_MSG,
+            },
+            {
+                "files": {"app.py": BASE, "tests/test_recv.py": TBASE},
+                "message": "refactor",
+            },
+        ]
+    )
+    out = tmp_path / "a.jsonl"
+    run_cli(r.root, out)
+    rows = read_jsonl(out)
+    cands = candidates(rows)
+    assert [c["sink"]["path"] for c in cands] == ["app.py"]
+    assert rows[0]["regressed"] == 1
+
+
+def test_assert_call_guard_on_non_test_path_still_regresses(
+    make_repo, tmp_path, run_cli, read_jsonl, candidates
+):
+    # an assert-shaped guard on a runtime path is a legit guard shape
+    # (a runtime invariant), only test-path sinks are filtered
+    r = make_repo(
+        [
+            {"files": {"app.py": BASE}, "message": "base"},
+            {"files": {"app.py": ASSERT_GUARDED}, "message": SEED_MSG},
+            {"files": {"app.py": BASE}, "message": "refactor"},
+        ]
+    )
+    out = tmp_path / "a.jsonl"
+    run_cli(r.root, out)
+    cands = candidates(read_jsonl(out))
+    assert len(cands) == 1
+    assert cands[0]["sink"]["path"] == "app.py"
+    assert cands[0]["family"] == "validation"

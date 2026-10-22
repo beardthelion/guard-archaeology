@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from archaeology import cli, seeds
 
 SIGNAL_SCRIPT = [
@@ -27,9 +29,24 @@ def _seeds(repo_root, **kw):
 
 def test_message_signals_select_exact_commits(make_repo):
     r = make_repo(SIGNAL_SCRIPT)
+    # advisory (default): only the CVE/GHSA-linked commits seed; the
+    # fix-verb x security-term harvest is off
     ss = _seeds(r.root)
-    assert [s.sha for s in ss.seeds] == [r.shas[1], r.shas[2], r.shas[5]]
+    assert [s.sha for s in ss.seeds] == [r.shas[2], r.shas[5]]
     assert not ss.unresolvable
+    # message/all restore the fix-verb x security-term harvest
+    for mode in ("message", "all"):
+        ss = _seeds(r.root, seeds_mode=mode)
+        assert [s.sha for s in ss.seeds] == [
+            r.shas[1], r.shas[2], r.shas[5],
+        ]
+        assert not ss.unresolvable
+
+
+def test_unknown_seeds_mode_is_a_typed_error(make_repo):
+    r = make_repo(SIGNAL_SCRIPT)
+    with pytest.raises(seeds.SeedsError):
+        _seeds(r.root, seeds_mode="everything")
 
 
 def test_cve_and_ghsa_seed_but_lone_terms_do_not(make_repo):
@@ -96,10 +113,15 @@ def test_unresolvable_seed_produces_explicit_record(make_repo, tmp_path):
 
 def test_until_excludes_later_seeds(make_repo):
     r = make_repo(SIGNAL_SCRIPT)
-    ss = _seeds(r.root, until=r.shas[2])
+    ss = _seeds(r.root, until=r.shas[2], seeds_mode="message")
     assert [s.sha for s in ss.seeds] == [r.shas[1], r.shas[2]]
-    ss = _seeds(r.root, until=r.shas[1])
+    ss = _seeds(r.root, until=r.shas[1], seeds_mode="message")
     assert [s.sha for s in ss.seeds] == [r.shas[1]]
+    # advisory mode under the same bounds keeps only advisory-linked seeds
+    ss = _seeds(r.root, until=r.shas[2])
+    assert [s.sha for s in ss.seeds] == [r.shas[2]]
+    ss = _seeds(r.root, until=r.shas[1])
+    assert ss.seeds == ()
 
 
 def test_seeds_file_entry_outside_window_is_unresolvable(make_repo, tmp_path):
@@ -232,8 +254,8 @@ def test_oversized_seeds_file_warns_and_is_ignored(
     f.write_bytes(b"# " + b"x" * (1024 * 1024) + b"\n")
     ss = _seeds(r.root, seeds_file=str(f))
     assert "oversized" in capsys.readouterr().err
-    # only the message-signaled seeds remain
-    assert {s.sha for s in ss.seeds} == {r.shas[1], r.shas[2], r.shas[5]}
+    # only the advisory-linked seeds remain under the default mode
+    assert {s.sha for s in ss.seeds} == {r.shas[2], r.shas[5]}
     assert not ss.unresolvable
 
 
@@ -257,12 +279,22 @@ def test_cli_summary_seed_count(make_repo, tmp_path, capsys):
     rc = cli.main([r.root, "--out", str(out), "--seeds-file", str(f)])
     assert rc == 0
     line = capsys.readouterr().out.strip()
-    # 3 message-signaled + shas[0] from the seeds file = 4 resolved seeds
-    assert "seeds=4" in line
+    # 2 advisory-signaled + shas[0] from the seeds file = 3 resolved seeds
+    assert "seeds=3" in line
     rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
     header = rows[0]
-    assert header["type"] == "run" and header["seeds"] == 4
+    assert header["type"] == "run" and header["seeds"] == 3
     assert header["tracked"] == 0
+    # --seeds-mode message brings back the fix-verb harvest
+    assert (
+        cli.main(
+            [r.root, "--out", str(out), "--seeds-file", str(f),
+             "--seeds-mode", "message"]
+        )
+        == 0
+    )
+    line = capsys.readouterr().out.strip()
+    assert "seeds=4" in line
 
 
 def test_cli_emits_unresolvable_seed_row(make_repo, tmp_path):
@@ -276,3 +308,161 @@ def test_cli_emits_unresolvable_seed_row(make_repo, tmp_path):
     assert len(errs) == 1
     assert errs[0]["seed"] == "1" * 40
     assert errs[0]["stage"] == "seeds"
+
+
+def test_test_only_and_vendored_message_seeds_dropped(make_repo):
+    r = make_repo(
+        [
+            {"files": {"app.py": "x = 1\n"}, "message": "init"},
+            {
+                "files": {"tests/test_app.py": "assert True\n"},
+                "message": "fix security overflow in parser",
+            },
+            {
+                "files": {"app.py": "y = 2\n"},
+                "message": "fix traversal vuln in loader",
+            },
+            {
+                "files": {"vendor/lib.py": "x = 1\n"},
+                "message": "patch CVE-2024-9999 in vendored lib",
+            },
+            {
+                "files": {
+                    "app.py": "z = 3\n",
+                    "tests/test_app.py": "assert True\n",
+                },
+                "message": "fix auth bypass CVE-2024-8888",
+            },
+        ]
+    )
+    ss = _seeds(r.root, seeds_mode="message")
+    # tests-only and vendor-only diffs are not guard origins, however
+    # strong the message signal; a mixed test+code diff still seeds
+    assert [s.sha for s in ss.seeds] == [r.shas[2], r.shas[4]]
+    ss = _seeds(r.root, seeds_mode="message", include_test_seeds=True)
+    assert {s.sha for s in ss.seeds} == {
+        r.shas[1], r.shas[2], r.shas[3], r.shas[4],
+    }
+
+
+def test_seeds_file_seed_kept_despite_test_only_diff(make_repo, tmp_path):
+    r = make_repo(
+        [
+            {"files": {"app.py": "x = 1\n"}, "message": "init"},
+            {
+                "files": {"tests/test_app.py": "assert True\n"},
+                "message": "touch up tests",
+            },
+        ]
+    )
+    f = tmp_path / "seeds.txt"
+    f.write_text(f"{r.shas[1]} CVE-2024-0001\n")
+    # explicit provenance is never dropped by the test-only check
+    ss = _seeds(r.root, seeds_file=str(f))
+    assert [s.sha for s in ss.seeds] == [r.shas[1]]
+
+
+def _merge_repo(make_repo, side_msg, merge_msg):
+    """Side branch with one commit, merged --no-ff into main."""
+    from pathlib import Path
+
+    from conftest import commit_env, run_git
+
+    r = make_repo([{"files": {"app.py": "x = 1\n"}, "message": "base"}])
+    run_git(r.root, "checkout", "-q", "-b", "side")
+    Path(r.root, "app.py").write_text("x = 2\n")
+    run_git(r.root, "add", "app.py")
+    run_git(r.root, "commit", "-q", "-m", side_msg, env_extra=commit_env(10))
+    side_sha = run_git(r.root, "rev-parse", "side").stdout.strip()
+    run_git(r.root, "checkout", "-q", "main")
+    run_git(
+        r.root, "merge", "--no-ff", "-m", merge_msg, "side",
+        env_extra=commit_env(11),
+    )
+    merge_sha = run_git(r.root, "rev-parse", "HEAD").stdout.strip()
+    return r, side_sha, merge_sha
+
+
+def test_merge_rollup_seed_deduped_against_seeded_side(make_repo):
+    r, side_sha, merge_sha = _merge_repo(
+        make_repo,
+        "fix traversal vuln in helper",
+        "merge branch fixing security issues",
+    )
+    ss = _seeds(r.root, seeds_mode="message")
+    shas = {s.sha for s in ss.seeds}
+    # the merge's message matched the fix-verb harvest but its merged
+    # side already seeds: the rollup contributes nothing
+    assert side_sha in shas
+    assert merge_sha not in shas
+
+
+def test_merge_rollup_kept_when_side_carries_no_seed(make_repo):
+    r, side_sha, merge_sha = _merge_repo(
+        make_repo, "tweak helper internals", "fix security overflow"
+    )
+    ss = _seeds(r.root, seeds_mode="message")
+    shas = {s.sha for s in ss.seeds}
+    assert merge_sha in shas
+    assert side_sha not in shas
+
+
+def test_merge_rollup_advisory_seed_never_deduped(make_repo):
+    # the merge carries an advisory id: explicit signal, never dropped
+    r, side_sha, merge_sha = _merge_repo(
+        make_repo, "fix traversal vuln in helper", "merge fix CVE-2024-9999"
+    )
+    ss = _seeds(r.root, seeds_mode="message")
+    shas = {s.sha for s in ss.seeds}
+    assert merge_sha in shas
+    assert side_sha in shas
+
+
+def test_cli_max_seeds_truncates_with_note(make_repo, tmp_path, capsys):
+    r = make_repo(SIGNAL_SCRIPT)
+    out = tmp_path / "o.jsonl"
+    rc = cli.main(
+        [
+            r.root, "--out", str(out),
+            "--seeds-mode", "message", "--max-seeds", "1",
+        ]
+    )
+    assert rc == 0
+    assert "seeds capped at 1" in capsys.readouterr().err
+    rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    assert rows[0]["seeds"] == 1
+
+
+def test_cli_max_seeds_zero_is_unbounded(make_repo, tmp_path, capsys):
+    r = make_repo(SIGNAL_SCRIPT)
+    out = tmp_path / "o.jsonl"
+    rc = cli.main(
+        [r.root, "--out", str(out), "--seeds-mode", "message",
+         "--max-seeds", "0"]
+    )
+    assert rc == 0
+    assert "capped" not in capsys.readouterr().err
+    rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    assert rows[0]["seeds"] == 3
+
+
+def test_cli_include_test_seeds_flag(make_repo, tmp_path, read_jsonl):
+    r = make_repo(
+        [
+            {"files": {"app.py": "x = 1\n"}, "message": "init"},
+            {
+                "files": {"tests/test_app.py": "assert True\n"},
+                "message": "fix CVE-2024-9999 in test helper",
+            },
+        ]
+    )
+    out = tmp_path / "o.jsonl"
+    assert cli.main([r.root, "--out", str(out)]) == 0
+    assert read_jsonl(out)[0]["seeds"] == 0
+    assert (
+        cli.main(
+            [r.root, "--out", str(out), "--include-test-seeds"]
+        )
+        == 0
+    )
+    assert read_jsonl(out)[0]["seeds"] == 1

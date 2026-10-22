@@ -404,3 +404,61 @@ def test_mask_code_blanks_strings_and_comments():
     assert masked.count("{") == 0
     masked = shapes.mask_code('x = 1  # { comment', "python")
     assert masked.count("{") == 0
+
+
+# --- path predicates -------------------------------------------------------------
+
+
+def test_is_test_path_dir_segments_and_basenames():
+    for p in (
+        "tests/test_app.py",
+        "x/test/y.py",
+        "a/testing/b.py",
+        "pkg/spec/s.py",
+        "e2e/run.js",
+        "tests/integration/deep.py",
+        "integration_tests/x.py",
+        "src/__mocks__/x.js",
+        "a/fixtures/b.py",
+        "mocks/f.py",
+        "helpers/stubs/s.py",
+        "foo/test_main.py",
+        "main_test.py",
+        "main_test.go",
+        "TestFoo.go",
+        "foo.test.ts",
+        "foo.spec.js",
+        "conftest.py",
+        "tests.py",
+    ):
+        assert shapes.is_test_path(p), p
+
+
+def test_is_test_path_negative():
+    for p in (
+        "app.py",
+        "src/parser.py",
+        "lib/contest.py",
+        "protest/x.py",
+        "src/attest/helpers.py",
+        "my_best_notes.txt",
+        "speculator.py",
+    ):
+        assert not shapes.is_test_path(p), p
+    assert not shapes.is_test_path("")
+    assert not shapes.is_test_path(None)
+
+
+def test_is_ignored_path_vendored_and_env_dirs():
+    for p in (
+        "vendor/lib.py",
+        "node_modules/pkg/index.js",
+        "src/node_modules/pkg/index.js",
+        "venv/lib/python3.12/site.py",
+        ".venv/x.py",
+        "third_party/y.go",
+        "deps/site-packages/z.py",
+    ):
+        assert shapes.is_ignored_path(p), p
+    for p in ("app.py", "vendorless/x.py", "src/env_setup.py"):
+        assert not shapes.is_ignored_path(p), p

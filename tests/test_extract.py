@@ -426,7 +426,7 @@ def _seeded_repo(make_repo):
                         "    return open(body).read()\n"
                     )
                 },
-                "message": "fix overflow bounds check",
+                "message": "fix overflow bounds check CVE-2024-42424",
             },
         ]
     )
@@ -476,7 +476,7 @@ def test_unsupported_extension_counts_skip(make_repo):
                         "}\n"
                     )
                 },
-                "message": "fix overflow bounds check",
+                "message": "fix overflow bounds check CVE-2024-42424",
             },
         ]
     )
@@ -536,7 +536,7 @@ def test_mixed_language_seed_commit(make_repo):
                         "}\n"
                     ),
                 },
-                "message": "fix overflow bounds check",
+                "message": "fix overflow bounds check CVE-2024-42424",
             },
         ]
     )
@@ -563,7 +563,8 @@ def test_new_file_seed_extracts(make_repo):
                         "}\n"
                     )
                 },
-                "message": "fix path traversal vulnerability",
+                "message": "fix path traversal vulnerability "
+                "CVE-2024-42424",
             },
         ]
     )
@@ -690,7 +691,8 @@ def test_merge_seed_extracts_guard(make_repo):
     )
     run_git(r.root, "checkout", "-q", "main")
     run_git(
-        r.root, "merge", "--no-ff", "-m", "fix overflow bounds check",
+        r.root, "merge", "--no-ff", "-m",
+        "fix overflow bounds check CVE-2024-42424",
         "side", env_extra=commit_env(11),
     )
     seed_set = seeds.collect_seeds(r.root)
@@ -698,3 +700,57 @@ def test_merge_seed_extracts_guard(make_repo):
     out = extract.extract_guards(r.root, seed_set)
     assert len(out.records) == 1
     assert out.records[0].sink_function == "recv"
+
+
+def test_oversized_blob_counts_skip(make_repo):
+    # a blob over the size cap is never materialized into a record;
+    # it counts as an extraction skip instead
+    pad = "# " + "x" * gitlog.MAX_BLOB_BYTES + "\n"
+    r = make_repo(
+        [
+            {"files": {"app.py": "x = 1\n"}, "message": "init"},
+            {
+                "files": {
+                    "app.py": (
+                        "def recv(body):\n"
+                        "    if len(body) > MAX_LEN:\n"
+                        '        raise ValueError("big")\n'
+                        "    return open(body).read()\n" + pad
+                    )
+                },
+                "message": "fix overflow bounds check CVE-2024-42424",
+            },
+        ]
+    )
+    seed_set = seeds.collect_seeds(r.root)
+    out = extract.extract_guards(r.root, seed_set)
+    assert out.records == ()
+    assert out.skip_reasons["oversized"] == 1
+
+
+def test_vendored_path_counts_ignored_skip(make_repo):
+    # vendored code is not corpus input; the first-party sibling file in
+    # the same commit still extracts
+    guarded = (
+        "def recv(body):\n"
+        "    if len(body) > MAX_LEN:\n"
+        '        raise ValueError("big")\n'
+        "    return open(body).read()\n"
+    )
+    r = make_repo(
+        [
+            {"files": {"app.py": "x = 1\n"}, "message": "init"},
+            {
+                "files": {
+                    "vendor/lib.py": guarded,
+                    "app.py": guarded,
+                },
+                "message": "fix overflow bounds check CVE-2024-42424",
+            },
+        ]
+    )
+    seed_set = seeds.collect_seeds(r.root)
+    out = extract.extract_guards(r.root, seed_set)
+    assert len(out.records) == 1
+    assert out.records[0].path == "app.py"
+    assert out.skip_reasons["ignored"] == 1

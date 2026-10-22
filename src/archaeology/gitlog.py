@@ -290,6 +290,11 @@ def merge_constituent_messages(repo, sha):
 
 # --- tree and blob reads ------------------------------------------------------
 
+# A blob larger than this is never guard source: corpus readers skip it
+# and the cache refuses to retain it.
+MAX_BLOB_BYTES = 1024 * 1024
+
+
 def show_file(repo, sha, path):
     """File content at <sha>:<path>, or NOT_FOUND when absent at that rev.
 
@@ -304,6 +309,49 @@ def show_file(repo, sha, path):
     if "does not exist" in err or "not in" in err:
         return NOT_FOUND
     raise GitError(full, rc, err)
+
+
+# Per-run memoization of show_file results keyed (repo, sha, path); the
+# same (commit, path) pair is re-materialized across corpus, tracking,
+# and emission reads. cli.run clears it once per invocation. A full cache
+# resets outright rather than evicting: oldest-first policy buys nothing
+# when re-reads are shuffled across the whole window.
+_BLOB_CACHE = {}
+_BLOB_CACHE_CAP = 20_000
+
+
+def clear_cache():
+    """Drop every memoized blob. Called once per run from cli.run."""
+    _BLOB_CACHE.clear()
+
+
+def show_file_cached(repo, sha, path):
+    """show_file memoized on (repo, sha, path); NOT_FOUND is cached too.
+
+    Blobs above MAX_BLOB_BYTES are returned but never retained, so a run
+    cannot pin hundreds of megabytes in the dict.
+    """
+    key = (str(repo), sha, path)
+    if key in _BLOB_CACHE:
+        return _BLOB_CACHE[key]
+    result = show_file(repo, sha, path)
+    if isinstance(result, str) and len(result) > MAX_BLOB_BYTES:
+        return result
+    if len(_BLOB_CACHE) >= _BLOB_CACHE_CAP:
+        _BLOB_CACHE.clear()
+    _BLOB_CACHE[key] = result
+    return result
+
+
+def changed_paths(repo, sha):
+    """Post-image paths a commit touched (-M rename detection).
+
+    'git show --name-only' prints no diff for a merge commit, so a merge
+    yields the empty list; callers treat that as 'cannot tell', never as
+    'provably touched nothing'.
+    """
+    out = _run(repo, ["show", "-M", "--name-only", "--format=", sha])
+    return [l for l in out.splitlines() if l.strip()]
 
 
 def ls_tree(repo, sha):

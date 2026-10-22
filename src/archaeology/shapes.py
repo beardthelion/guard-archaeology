@@ -55,6 +55,71 @@ def basename(dotted):
     return base.rstrip("!")
 
 
+# --- path predicates -----------------------------------------------------------
+
+# Directory segments that mark a path as test or test-support code at any
+# depth: test trees, spec suites, integration-test dirs, fixtures, mocks,
+# stubs, and fakes.
+_TEST_DIR_SEGMENTS = frozenset(
+    "test tests testing spec specs e2e integration integration_test "
+    "integration_tests integrationtest integrationtests fixture "
+    "fixtures __fixtures__ __mocks__ mock mocks stub stubs fake fakes "
+    "testdata test_data".split()
+)
+
+# Vendored or environment trees: third-party code a repo carries but did
+# not write. A guard there is not the project's to lose, and the corpus
+# has nothing to prove against it.
+_IGNORED_DIR_SEGMENTS = frozenset(
+    "vendor vendored node_modules bower_components third_party "
+    "thirdparty third-party site-packages dist-packages venv .venv "
+    "virtualenv .virtualenv env .env .tox .nox".split()
+)
+
+# Test-file basenames: test_x.py, Test*.go, *_test.py/_test.go,
+# *.test.*, *.spec.*, conftest.py.
+_TEST_BASENAME_RES = (
+    re.compile(r"^tests?(?:_|\.|[A-Z])"),
+    re.compile(r"^Test.*\.go$"),
+    re.compile(r"_test\.[^.]+$", re.IGNORECASE),
+    re.compile(r"\.(?:test|spec)\.[^.]+$", re.IGNORECASE),
+    re.compile(r"^conftest\.py$", re.IGNORECASE),
+)
+
+
+def is_test_path(path):
+    """True when a repo path is test or test-support code.
+
+    A test/fixture/mock dir segment at any depth matches, as does a
+    test-file basename (test_*.py, *_test.py, *_test.go, Test*.go,
+    *.test.*, *.spec.*, conftest.py).
+    """
+    if not path:
+        return False
+    segs = [s for s in str(path).split("/") if s]
+    if not segs:
+        return False
+    for seg in segs[:-1]:
+        if seg.lower() in _TEST_DIR_SEGMENTS:
+            return True
+    base = segs[-1]
+    if base.lower() in _TEST_DIR_SEGMENTS:
+        return True
+    return any(r.search(base) for r in _TEST_BASENAME_RES)
+
+
+def is_ignored_path(path):
+    """True for vendored or environment paths (vendor/, node_modules/,
+    venv/, ...): code the repo carries but did not write."""
+    if not path:
+        return False
+    return any(
+        s.lower() in _IGNORED_DIR_SEGMENTS
+        for s in str(path).split("/")
+        if s
+    )
+
+
 def _call_re(name):
     """Bare ``name(`` invocation: not attribute- or ``$``-qualified."""
     return re.compile(r"(?<![\w$.])" + re.escape(name) + r"\s*\(")
@@ -362,6 +427,97 @@ _SINK_RES = {
         re.compile(r"\bpath\.(?:join|resolve|normalize)\s*\("),
         re.compile(r"\bnet\.(?:connect|createConnection)\s*\("),
     ),
+}
+
+# Dispatch-registration callees: framework entry-point bindings. A
+# statement like 'self.add_route("GET", self._handle)' registers
+# _handle as a request handler; the framework dispatcher is the real
+# caller and contributes no guard, so the binding is a resolvable
+# unguarded caller edge, not a lexical-mention ambiguity (the KTD7
+# hole: aiohttp StaticResource._handle is bound by an attribute-access
+# argument inside the same file and otherwise reads unprovable).
+#
+# "args": regexes matched on masked statement text; callers.py
+#   additionally requires the sink basename as a word inside the
+#   call's balanced argument list, so BOTH conditions must hold.
+#   Generic verbs (route/get/use/on/...) match member-access callees
+#   only ('router.get('); the bare forms are too common to read as
+#   registration. Distinctive names (add_route, HandleFunc,
+#   addEventListener) match bare or member form. 'app.add_route' style
+#   dotted entries need no separate row: the member prefix already
+#   covers them.
+# "decorator": a '@'-line directly above a def is already registration
+#   context, so every table name is safe bare there ('@route("/x")'
+#   and '@app.route("/x")' alike). go/rust have no in-scope decorator
+#   shape.
+_MEMBER_PREFIX = r"(?:[A-Za-z_$][\w$]*\s*\.\s*)"
+_DISPATCH_RES = {
+    "python": {
+        "args": (
+            re.compile(
+                r"(?<![\w$])" + _MEMBER_PREFIX + r"*"
+                r"(?:add_route|add_url_rule|add_handler|add_resource|"
+                r"include_router|register_function|register_rpc)\s*\("
+            ),
+            re.compile(
+                r"(?<![\w$])" + _MEMBER_PREFIX + r"+"
+                r"(?:route|get|post|put|delete|patch|head|options|"
+                r"use|connect|on|register)\s*\("
+            ),
+        ),
+        "decorator": re.compile(
+            r"^\s*@\s*" + _MEMBER_PREFIX + r"*"
+            r"(?:add_route|add_url_rule|add_handler|add_resource|"
+            r"include_router|register_function|register_rpc|route|"
+            r"get|post|put|delete|patch|head|options|use|connect|on|"
+            r"register)\s*\("
+        ),
+    },
+    "tsjs": {
+        "args": (
+            re.compile(
+                r"(?<![\w$])" + _MEMBER_PREFIX + r"*"
+                r"(?:addEventListener|registerFunction|registerRpc)\s*\("
+            ),
+            re.compile(
+                r"(?<![\w$])" + _MEMBER_PREFIX + r"+"
+                r"(?:route|get|post|put|delete|patch|use|on|register|"
+                r"handler|handle|subscribe)\s*\("
+            ),
+        ),
+        "decorator": re.compile(
+            r"^\s*@\s*" + _MEMBER_PREFIX + r"*"
+            r"(?:addEventListener|registerFunction|registerRpc|route|"
+            r"get|post|put|delete|patch|use|on|register|handler|"
+            r"handle|subscribe)\s*\("
+        ),
+    },
+    "go": {
+        "args": (
+            re.compile(
+                r"(?<![\w$])" + _MEMBER_PREFIX + r"*"
+                r"(?:HandleFunc|RegisterFunc|HandleEvent)\s*\("
+            ),
+            re.compile(
+                r"(?<![\w$])" + _MEMBER_PREFIX + r"+"
+                r"(?:Handle|Route|Use|On|Register)\s*\("
+            ),
+        ),
+        "decorator": None,
+    },
+    "rust": {
+        "args": (
+            re.compile(
+                r"(?<![\w$])" + _MEMBER_PREFIX + r"*"
+                r"(?:add_route|register_rpc)\s*\("
+            ),
+            re.compile(
+                r"(?<![\w$])" + _MEMBER_PREFIX + r"+"
+                r"(?:route|register|on|handle|rpc)\s*\("
+            ),
+        ),
+        "decorator": None,
+    },
 }
 
 

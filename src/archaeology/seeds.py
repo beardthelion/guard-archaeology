@@ -3,6 +3,12 @@
 The seed set is the noise gate: only commits inside the R2 bounded window
 with a security signal, an operator-supplied advisory entry, or a
 security-marked ref become guard origins.
+
+``seeds_mode`` sets the message harvest's breadth: ``advisory`` (the
+default) keeps only advisory-linked commits (a CVE/GHSA id in subject or
+body); ``message`` and ``all`` additionally harvest the noisier
+fix-verb x security-term pairing. Seeds-file entries and marked refs are
+unaffected by the mode: both are explicit provenance.
 """
 
 from __future__ import annotations
@@ -11,7 +17,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from . import exposure, gitlog
+from . import exposure, gitlog, shapes
 
 _MAX_SEEDS_BYTES = 1024 * 1024
 _MAX_SEEDS_LINES = 10_000
@@ -44,6 +50,12 @@ SOURCE_SEEDS_FILE = "seeds-file"
 SOURCE_MESSAGE = "message"
 SOURCE_REF = "ref"
 
+SEEDS_MODES = ("advisory", "message", "all")
+
+# A merge rollup's second-parent ancestry is scanned this far for an
+# already-seeded commit before the merge itself is kept as a seed.
+_MERGE_SIDE_CAP = 50
+
 
 class SeedsError(Exception):
     """The seeds file could not be read or parsed."""
@@ -68,20 +80,29 @@ class SeedSet:
 _REVERT_SUBJECT_RE = re.compile(r"\s*revert\b", re.IGNORECASE)
 
 
-def message_has_signal(subject, body=""):
-    """True when the commit message carries a security signal.
+def _message_signal(subject, body=""):
+    """'advisory' or 'fixverb': which signal a commit message carries.
 
-    A 'Revert ...' subject never seeds on the fix-verb x security-term
+    An advisory id (CVE/GHSA) in subject or body is the advisory signal;
+    a fix verb paired with a security term on the subject is the noisier
+    fixverb signal. A 'Revert ...' subject never seeds on the fixverb
     signal: revert-of-fix is a removal-classification signal, not a
     guard origin. An explicit CVE/GHSA id still seeds.
     """
     if CVE_RE.search(subject) or GHSA_RE.search(subject):
-        return True
+        return "advisory"
     if body and (CVE_RE.search(body) or GHSA_RE.search(body)):
-        return True
+        return "advisory"
     if _REVERT_SUBJECT_RE.match(subject):
-        return False
-    return bool(FIX_VERB_RE.search(subject) and SEC_TERM_RE.search(subject))
+        return None
+    if FIX_VERB_RE.search(subject) and SEC_TERM_RE.search(subject):
+        return "fixverb"
+    return None
+
+
+def message_has_signal(subject, body=""):
+    """True when the commit message carries any security signal."""
+    return _message_signal(subject, body) is not None
 
 
 def parse_seeds_file(text):
@@ -164,19 +185,104 @@ def _security_ref_seeds(repo, window):
     return records
 
 
-def collect_seeds(repo, seeds_file=None, since=None, until=None):
+def _drop_test_only_seeds(repo, seed_list, explicit):
+    """Drop message-signal seeds whose whole diff is test/vendored churn.
+
+    A seeds-file entry or a marked-ref seed is explicit provenance and
+    stays regardless of what it touched, even when its recorded source
+    is 'message' because the message pass won the dedup. A
+    message-harvested commit that touched only test or third-party
+    paths is not a guard origin. A commit whose changed paths cannot
+    be listed (a merge's empty name-only diff, a git failure) is kept:
+    the drop must be proven, never guessed.
+    """
+    changed = {}
+    out = []
+    for s in seed_list:
+        if s.source != SOURCE_MESSAGE or s.sha in explicit:
+            out.append(s)
+            continue
+        if s.sha not in changed:
+            try:
+                changed[s.sha] = gitlog.changed_paths(repo, s.sha)
+            except gitlog.GitError:
+                changed[s.sha] = None
+        paths = changed[s.sha]
+        if paths and all(
+            shapes.is_test_path(p) or shapes.is_ignored_path(p)
+            for p in paths
+        ):
+            continue
+        out.append(s)
+    return out
+
+
+def _drop_merge_rollups(repo, seed_list, fixverb_only, window, explicit):
+    """Drop a fixverb-only merge seed whose merged side already seeded.
+
+    A rollup merge ('merge the branch fixing the security issue')
+    re-signals work whose real commits are already seeds; when a
+    non-merge ancestor on the second-parent side is itself a seed, the
+    merge contributes nothing. Advisory-linked, seeds-file, and ref
+    seeds are never dropped here. The side ancestry scan is bounded so
+    a giant merge cannot blow up the walk.
+    """
+    seed_shas = {s.sha for s in seed_list}
+    out = []
+    for s in seed_list:
+        if (
+            s.source != SOURCE_MESSAGE
+            or s.sha not in fixverb_only
+            or s.sha in explicit
+        ):
+            out.append(s)
+            continue
+        c = window.get(s.sha)
+        if c is None or len(c.parents) < 2:
+            out.append(s)
+            continue
+        try:
+            side = gitlog.rev_list(
+                repo, c.parents[1], exclude=[c.parents[0]]
+            )[:_MERGE_SIDE_CAP]
+        except gitlog.GitError:
+            out.append(s)
+            continue
+        if any(
+            len(window[sha].parents) < 2
+            for sha in side
+            if sha in seed_shas
+        ):
+            continue  # the merged work already seeds itself
+        out.append(s)
+    return out
+
+
+def collect_seeds(repo, seeds_file=None, since=None, until=None,
+                  seeds_mode="advisory", include_test_seeds=False):
     """Collect the deduplicated, windowed seed set for a repo.
 
     Message signals, seeds-file SHAs, and security-marked refs all feed the
     same window (ancestors of ``until``, minus ``since`` ancestry). Every
     seeds-file entry that fails to resolve inside the window produces an
     explicit unresolvable record rather than a silent drop.
+
+    ``seeds_mode`` is 'advisory' (CVE/GHSA ids only), 'message' (adds the
+    fix-verb x security-term harvest), or 'all' (same as 'message').
+    ``include_test_seeds`` keeps message-signal seeds whose diff only
+    touches test/vendored paths; by default they are dropped.
     """
+    if seeds_mode not in SEEDS_MODES:
+        raise SeedsError(f"unknown seeds mode: {seeds_mode}")
     commits = gitlog.log(repo, until=until, since=since)
     window = {c.sha: c for c in commits}
 
     records = {}
     unresolvable = []
+    # SHAs the operator or the repo's own markings named: a commit that
+    # also matched a message signal keeps its explicit provenance even
+    # when the dedup records 'message' as its source
+    explicit = set()
 
     def add(sha, advisory_id, source, resolved=True):
         if not resolved or sha not in window:
@@ -198,15 +304,29 @@ def collect_seeds(repo, seeds_file=None, since=None, until=None):
             sha = gitlog.resolve_commit(repo, token)
             add(sha if sha is not None else token, advisory_id,
                 SOURCE_SEEDS_FILE, resolved=sha is not None)
+            if sha is not None:
+                explicit.add(sha)
 
+    harvest_fixverb = seeds_mode != "advisory"
+    fixverb_only = set()
     messages = gitlog.commit_messages(repo, until=until, since=since)
     for c in commits:
-        if message_has_signal(c.subject, messages.get(c.sha, "")):
-            add(c.sha, None, SOURCE_MESSAGE)
+        kind = _message_signal(c.subject, messages.get(c.sha, ""))
+        if kind is None or (kind == "fixverb" and not harvest_fixverb):
+            continue
+        if kind == "fixverb":
+            fixverb_only.add(c.sha)
+        add(c.sha, None, SOURCE_MESSAGE)
 
     for ref_name, shas in _security_ref_seeds(repo, window):
         for sha in shas:
+            explicit.add(sha)
             add(sha, None, f"{SOURCE_REF}:{ref_name}")
 
-    seeds = sorted(records.values(), key=lambda s: (s.date, s.sha))
-    return SeedSet(seeds=tuple(seeds), unresolvable=tuple(unresolvable))
+    seed_list = sorted(records.values(), key=lambda s: (s.date, s.sha))
+    if not include_test_seeds:
+        seed_list = _drop_test_only_seeds(repo, seed_list, explicit)
+    seed_list = _drop_merge_rollups(
+        repo, seed_list, fixverb_only, window, explicit
+    )
+    return SeedSet(seeds=tuple(seed_list), unresolvable=tuple(unresolvable))

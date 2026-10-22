@@ -33,7 +33,7 @@ REFLOWED = (
 
 FRESH = "def g(d):\n    return os.popen(d).read()\n"
 
-SEED_MSG = "fix overflow bounds check"
+SEED_MSG = "fix overflow bounds check CVE-2024-42424"
 
 
 def _track(make_repo, commits, until=None):
@@ -399,6 +399,9 @@ def test_track_failure_records_error_and_unverifiable(
     )
     seed_set = seeds.collect_seeds(r.root)
     ext = extract.extract_guards(r.root, seed_set)
+    # extraction already memoized the seed blob; drop the cache so the
+    # patched show_file is what tracking actually hits
+    gitlog.clear_cache()
 
     def boom(repo, sha, path):
         raise gitlog.GitError(["git", "show"], 128, "boom")

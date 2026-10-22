@@ -60,6 +60,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="upper rev bound: restrict history to ancestors of this rev",
     )
+    p.add_argument(
+        "--seeds-mode",
+        choices=seeds.SEEDS_MODES,
+        default="advisory",
+        help="message-signal harvest breadth: 'advisory' (default) keeps "
+        "CVE/GHSA-linked commits only, 'message' adds the fix-verb x "
+        "security-term harvest, 'all' is equivalent to 'message'",
+    )
+    p.add_argument(
+        "--include-test-seeds",
+        action="store_true",
+        help="keep message-signal seeds whose diff touches only "
+        "test/vendored paths (dropped by default)",
+    )
+    p.add_argument(
+        "--max-seeds",
+        type=int,
+        default=0,
+        help="cap the collected seed set after dedup (0 = unbounded)",
+    )
     p.add_argument("--caller-depth", type=int, default=2)
     p.add_argument("--exposure-file", default=None)
     p.add_argument("--also-md", action="store_true")
@@ -119,6 +139,9 @@ def run(
     seeds_file: str | None = None,
     since: str | None = None,
     until: str | None = None,
+    seeds_mode: str = "advisory",
+    include_test_seeds: bool = False,
+    max_seeds: int = 0,
     caller_depth: int = 2,
     exposure_file: str | None = None,
     also_md: bool = False,
@@ -131,6 +154,15 @@ def run(
         raise ArchaeologyError(f"not a git repository: {repo_root}")
     if caller_depth < 0:
         raise ArchaeologyError("--caller-depth must be >= 0")
+    if max_seeds < 0:
+        raise ArchaeologyError("--max-seeds must be >= 0")
+    if seeds_mode not in seeds.SEEDS_MODES:
+        raise ArchaeologyError(f"--seeds-mode must be one of "
+                               f"{'/'.join(seeds.SEEDS_MODES)}")
+
+    # the blob cache is per-run: stale materializations must never leak
+    # into a second invocation on a mutated clone
+    gitlog.clear_cache()
 
     # --since/--until reach git argv as revspecs: a value spelled like a
     # flag could smuggle a git option in (e.g. --until=--output=/path),
@@ -157,10 +189,21 @@ def run(
 
     try:
         seed_set = seeds.collect_seeds(
-            real, seeds_file=seeds_file, since=since, until=until
+            real, seeds_file=seeds_file, since=since, until=until,
+            seeds_mode=seeds_mode, include_test_seeds=include_test_seeds,
         )
     except (seeds.SeedsError, gitlog.GitError) as e:
         raise ArchaeologyError(str(e))
+    if max_seeds and len(seed_set.seeds) > max_seeds:
+        # deterministic truncation: the set is already ordered, keep the
+        # first N of it as-is
+        exposure._warn(
+            f"seeds capped at {max_seeds} of {len(seed_set.seeds)}"
+        )
+        seed_set = seeds.SeedSet(
+            seeds=seed_set.seeds[:max_seeds],
+            unresolvable=seed_set.unresolvable,
+        )
 
     extraction = extract.extract_guards(real, seed_set)
     records = extraction.records
@@ -188,13 +231,21 @@ def run(
     )
     candidates = [r for r in rows if r.get("type") == "candidate"]
 
+    # the emitted header is authoritative for the counts line: build_rows
+    # recounts 'regressed' after the test-sink candidate filter, so the
+    # printed summary and the markdown must read the header back rather
+    # than the pre-filter verdict counts
+    header = RunCounts(
+        **{k: v for k, v in rows[0].items() if k != "type"}
+    )
+
     try:
         emit.write_outputs(
             rows,
             out_path,
             also_md=also_md,
             md_text=(
-                emit.render_markdown(counts, candidates)
+                emit.render_markdown(header, candidates)
                 if also_md
                 else None
             ),
@@ -202,7 +253,7 @@ def run(
     except OSError as e:
         raise ArchaeologyError(f"cannot write output: {e}")
 
-    print(summary_line(counts))
+    print(summary_line(header))
     return 0
 
 
@@ -218,6 +269,9 @@ def main(argv=None) -> int:
             seeds_file=args.seeds_file,
             since=args.since,
             until=args.until,
+            seeds_mode=args.seeds_mode,
+            include_test_seeds=args.include_test_seeds,
+            max_seeds=args.max_seeds,
             caller_depth=args.caller_depth,
             exposure_file=args.exposure_file,
             also_md=args.also_md,

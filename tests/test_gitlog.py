@@ -393,3 +393,92 @@ def test_commit_patch_merge_diffs_first_parent(make_repo):
         (p.new_path, t) for p in patches for _n, t in p.added
     ]
     assert ("app.py", "    if len(body) > MAX_LEN:") in added
+
+
+# --- blob cache ----------------------------------------------------------------
+
+
+def test_show_file_cached_memoizes_hits_and_misses(make_repo, monkeypatch):
+    gitlog.clear_cache()
+    r = make_repo(BASIC)
+    calls = []
+    orig = gitlog.show_file
+
+    def counting(repo, sha, path):
+        calls.append((sha, path))
+        return orig(repo, sha, path)
+
+    monkeypatch.setattr(gitlog, "show_file", counting)
+    first = gitlog.show_file_cached(r.root, r.shas[0], "a.txt")
+    second = gitlog.show_file_cached(r.root, r.shas[0], "a.txt")
+    assert first == second == "one\n"
+    assert calls == [(r.shas[0], "a.txt")]
+    # a NOT_FOUND verdict is memoized too
+    miss = gitlog.show_file_cached(r.root, r.shas[0], "missing.txt")
+    assert miss is gitlog.NOT_FOUND
+    assert (
+        gitlog.show_file_cached(r.root, r.shas[0], "missing.txt")
+        is gitlog.NOT_FOUND
+    )
+    assert len(calls) == 2
+    # clearing forces a fresh read
+    gitlog.clear_cache()
+    gitlog.show_file_cached(r.root, r.shas[0], "a.txt")
+    assert len(calls) == 3
+
+
+def test_show_file_cached_never_retains_oversized_blob(
+    make_repo, monkeypatch
+):
+    gitlog.clear_cache()
+    pad = "# " + "x" * gitlog.MAX_BLOB_BYTES + "\n"
+    r = make_repo([{"files": {"big.txt": pad}, "message": "big"}])
+    calls = []
+    orig = gitlog.show_file
+
+    def counting(repo, sha, path):
+        calls.append((sha, path))
+        return orig(repo, sha, path)
+
+    monkeypatch.setattr(gitlog, "show_file", counting)
+    a = gitlog.show_file_cached(r.root, r.shas[0], "big.txt")
+    b = gitlog.show_file_cached(r.root, r.shas[0], "big.txt")
+    assert a == b == pad
+    # the oversized blob is re-read, never retained
+    assert len(calls) == 2
+
+
+def test_blob_cache_cap_resets_instead_of_growing(make_repo, monkeypatch):
+    gitlog.clear_cache()
+    monkeypatch.setattr(gitlog, "_BLOB_CACHE_CAP", 2)
+    r = make_repo(BASIC)
+    for path in ("a.txt", "b.txt", "c.txt"):
+        gitlog.show_file_cached(r.root, r.shas[3], path)
+    assert len(gitlog._BLOB_CACHE) <= 2
+    gitlog.clear_cache()
+
+
+def test_changed_paths_lists_touched_files(make_repo):
+    r = make_repo(BASIC)
+    assert gitlog.changed_paths(r.root, r.shas[0]) == ["a.txt"]
+    assert sorted(gitlog.changed_paths(r.root, r.shas[1])) == [
+        "a.txt",
+        "b.txt",
+    ]
+
+
+def test_changed_paths_empty_for_merge(make_repo):
+    # a merge produces no name-only diff; callers treat empty as
+    # "cannot tell", never as "provably touched nothing"
+    r = make_repo([{"files": {"a.txt": "one\n"}, "message": "base"}])
+    run_git(r.root, "checkout", "-q", "-b", "side")
+    Path(r.root, "b.txt").write_text("x\n")
+    run_git(r.root, "add", "b.txt")
+    run_git(r.root, "commit", "-q", "-m", "side", env_extra=commit_env(1))
+    run_git(r.root, "checkout", "-q", "main")
+    run_git(
+        r.root, "merge", "--no-ff", "-m", "merge side", "side",
+        env_extra=commit_env(2),
+    )
+    merge_sha = run_git(r.root, "rev-parse", "HEAD").stdout.strip()
+    assert gitlog.changed_paths(r.root, merge_sha) == []

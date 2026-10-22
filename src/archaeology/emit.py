@@ -27,7 +27,7 @@ import os
 import tempfile
 from dataclasses import asdict, is_dataclass
 
-from . import callers, exposure, gitlog
+from . import callers, exposure, gitlog, shapes
 
 _EXCERPT_CTX = 3  # context lines each side of the sink op in "current"
 _MAX_HOLDOUT_BYTES = 16 * 1024 * 1024
@@ -123,12 +123,14 @@ def _boundary_sink(repo, outcome):
     text = None
     if outcome.boundary_path and outcome.boundary_sha:
         try:
-            got = gitlog.show_file(
+            got = gitlog.show_file_cached(
                 repo, outcome.boundary_sha, outcome.boundary_path
             )
         except gitlog.GitError:
             got = gitlog.NOT_FOUND
-        if got is not gitlog.NOT_FOUND:
+        # an oversized boundary file keeps the recorded excerpt rather
+        # than paying for a second materialization pass
+        if got is not gitlog.NOT_FOUND and len(got) <= gitlog.MAX_BLOB_BYTES:
             text = got
     if text is None:
         return None, outcome.boundary_excerpt
@@ -218,14 +220,28 @@ def build_rows(repo, counts, verdicts, unresolvable=(), extract_errors=(),
     """The full JSONL row set: run header, sorted REGRESSED candidates,
     then per-stage error rows (R12, R13, R18)."""
     cdict = asdict(counts) if is_dataclass(counts) else dict(counts)
-    rows = [{"type": "run", **cdict}]
     regressed = [
         v for v in verdicts or ()
         if getattr(v, "verdict", None) == "regressed"
     ]
     regressed.sort(key=lambda v: _candidate_sort_key(repo, v))
+    rows = [{"type": "run", **cdict}]
+    emitted = 0
     for v in regressed:
+        o = v.outcome
+        sink_path = o.boundary_path or o.guard.sink_path
+        if shapes.is_test_path(sink_path):
+            # a guard whose sink lives in test/support code is never a
+            # drain candidate (assert-shape guards on test files were
+            # v1's false-positive class). The verdict itself stays in
+            # the verdicts list; only the row and the header count drop.
+            continue
         rows.append(candidate_row(repo, v, emap, holdout))
+        emitted += 1
+    if emitted != cdict.get("regressed"):
+        # the header counts what was emitted, so a filtered test-sink
+        # regression cannot report regressed>0 while producing no row
+        rows[0]["regressed"] = emitted
     for u in unresolvable or ():
         rows.append(
             {

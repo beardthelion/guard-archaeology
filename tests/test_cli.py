@@ -173,7 +173,7 @@ def test_run_header_reports_skipped(make_repo, tmp_path, read_jsonl):
             {"files": {"app.py": "x = 1\n"}, "message": "base"},
             {
                 "files": {"app.py": "x = 1\ny = transform(x)\n"},
-                "message": "fix overflow bounds check",
+                "message": "fix overflow bounds check CVE-2024-42424",
             },
         ]
     )
@@ -196,7 +196,10 @@ def test_latin1_blob_run_completes(make_repo, tmp_path, capsys):
     r = make_repo(
         [
             {"files": {"app.py": b"x = 1\n"}, "message": "base"},
-            {"files": {"app.py": blob}, "message": "fix overflow bounds check"},
+            {
+                "files": {"app.py": blob},
+                "message": "fix overflow bounds check CVE-2024-42424",
+            },
         ]
     )
     out = tmp_path / "o.jsonl"
