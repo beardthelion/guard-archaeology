@@ -1,7 +1,8 @@
 # Usefulness audit, round 2
 
 Re-run of the v1 usefulness audit after the fix batch. All targets are
-fresh clones under /tmp; every command shown verbatim. Date: 2026-10-22.
+fresh clones; paths below are placeholders (`<aiohttp-clone>`, etc.) and
+all output was written outside the target clones. Date: 2026-10-22.
 
 ## What changed since the failed audit
 
@@ -21,7 +22,7 @@ fresh clones under /tmp; every command shown verbatim. Date: 2026-10-22.
 
 ## Gate (aiohttp known-answer) — PASS
 
-`archaeology /tmp/gate-aiohttp --out /tmp/ga-out3.jsonl --seeds-file /tmp/seeds-aiohttp.txt --until 0e2d3ec48a950a2aacaf3f5d0d1f1597a1d5385b`
+`archaeology <aiohttp-clone> --out <out>.jsonl --seeds-file <seeds-aiohttp.txt> --until 0e2d3ec48a950a2aacaf3f5d0d1f1597a1d5385b`
 
 `seeds=49 tracked=2 intact=0 regressed=1 relocated=1 removed_with_sink=0 deliberate=0 unknown=0`
 
@@ -33,7 +34,7 @@ the removal's parent emits zero candidates (intact=2).
 
 ## Chia (Chia-Network/chia-blockchain)
 
-- clone: /tmp/ga-chia, HEAD 796739af6 at run time
+- clone: fresh clone, HEAD 796739af6 at run time
 - advisory default: `seeds=6 tracked=16 intact=2 regressed=0 relocated=8
   removed_with_sink=3 deliberate=0 unknown=3` (~2 min)
 - message mode: `seeds=84 tracked=22 intact=6 regressed=0 relocated=10
@@ -42,9 +43,9 @@ the removal's parent emits zero candidates (intact=2).
   emit candidates under the runtime-only rule regardless.
 - REGRESSED yield: **0**
 
-## Hermes (beardthelion/hermes-agent)
+## Hermes (NousResearch/hermes-agent)
 
-- clone: /tmp/ga-hermes, pinned to audited SHA
+- clone: fresh clone, pinned to
   1089d3315a68ff9692a866eb462f6421e3c02257
 - stock advisory run: `seeds=65 tracked=35 intact=13 regressed=0
   relocated=1 removed_with_sink=9 deliberate=3 unknown=9`, ~2 min wall.

@@ -8,11 +8,11 @@ clones. Date of record: 2026-10-22.
 ## Leg 1: known-answer (aio-libs/aiohttp)
 
 - target: https://github.com/aio-libs/aiohttp (Python, active)
-- clone: /tmp/gate-aiohttp (full clone, not shallow)
+- clone: `<aiohttp-clone>` (full clone, not shallow)
 - pinned SHA: 7275bea9eae591d5246b8fd9e2e9ba004b6f30f7 (master@HEAD at clone time)
 - tree: clean (`git status --porcelain` empty; `git rev-parse HEAD` equals pin)
-- seeds-file: `2297325962412113b412352a4d2c8a0f64b5bc71 GHSA-leg1-aiohttp-anchor`
-- command: `archaeology /tmp/gate-aiohttp --out /tmp/ga-out3.jsonl --seeds-file /tmp/seeds-aiohttp.txt --until 0e2d3ec48a950a2aacaf3f5d0d1f1597a1d5385b`
+- seeds-file: `2297325962412113b412352a4d2c8a0f64b5bc71 FIXTURE-aiohttp-anchor`
+- command: `archaeology <aiohttp-clone> --out <out>.jsonl --seeds-file <seeds-aiohttp.txt> --until 0e2d3ec48a950a2aacaf3f5d0d1f1597a1d5385b`
 - `--until` boundary: 0e2d3ec48a950a2aacaf3f5d0d1f1597a1d5385b, parent of
   f049588a ("Block absolute paths in static files"), i.e. just before the
   second fix
@@ -67,7 +67,7 @@ Same repo, same seeds-file, `--until` at the removal commit's parent
 (7a067d1905e1eeb921a50010dd0004990dbb3bf0), where the guard is still
 present:
 
-- command: `archaeology /tmp/gate-aiohttp --out /tmp/ga-neg.jsonl --seeds-file /tmp/seeds-aiohttp.txt --until 7a067d1905e1eeb921a50010dd0004990dbb3bf0`
+- command: `archaeology <aiohttp-clone> --out <neg>.jsonl --seeds-file <seeds-aiohttp.txt> --until 7a067d1905e1eeb921a50010dd0004990dbb3bf0`
 - counts: seeds=42 tracked=2 intact=2 regressed=0 relocated=0
   removed_with_sink=0 deliberate=0 unknown=0
 - read: zero candidates where no silent loss exists. Both guards
@@ -79,20 +79,20 @@ file.
 
 ## Leg 2: drainability (holdout sibling repo)
 
-- target: /home/ubuntu/projects/holdout (local clone, used read-only)
+- target: beardthelion/holdout (local clone, used read-only)
 - pinned SHA: cd8d3f1d73afd255562d1949a0cba8c460f26457
 - tree: clean
 
 ### Run A: natural seeding (advisory default)
 
-- command: `archaeology /home/ubuntu/projects/holdout --out /tmp/ga-holdout-out.jsonl`
+- command: `archaeology <holdout-clone> --out <out>.jsonl`
 - counts: seeds=0 tracked=0 intact=0 regressed=0 relocated=0
   removed_with_sink=0 deliberate=0 unknown=0
 - read: vacuous - no advisory-signaled commits in the window.
 
 ### Run B: forced seeding (all 10 commits via --seeds-file)
 
-- command: `archaeology /home/ubuntu/projects/holdout --out /tmp/ga-holdout-forced.jsonl --seeds-file /tmp/seeds-holdout.txt`
+- command: `archaeology <holdout-clone> --out <forced>.jsonl --seeds-file <seeds-holdout.txt>`
 - counts: seeds=10 tracked=40 intact=33 regressed=0 relocated=1
   removed_with_sink=2 deliberate=0 unknown=4
 - UNKNOWN share: 4/40 = 10%

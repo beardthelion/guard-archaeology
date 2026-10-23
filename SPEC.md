@@ -1,7 +1,6 @@
 # Guard Archaeology — SPEC
 
-Status: spec (2026-10-21). Build order in the tool queue: Holdout first,
-then this. Repo: beardthelion/guard-archaeology (private).
+Status: spec (2026-10-21). Sibling tool: Holdout.
 
 ## Purpose
 
@@ -11,13 +10,12 @@ Patch history asks what got fixed. Guard archaeology asks what unfixed
 itself: a validation, bounds check, auth check, or escaping step added in
 one commit (very often a security fix), then removed by a later commit
 (refactor, rewrite, merge cleanup) while the dangerous operation it
-protected is still there. Fix regressions are a real paid class in
-source-code bounties, and no existing tool in the stack greps history
-for removed defenses.
+protected is still there. Fix regressions are a real, recurring
+vulnerability class, and few tools grep history for removed defenses.
 
-The tool's output is candidates, not findings. A candidate enters the
-audit pipeline at kill-before-debug and pays only on a proven PoC, same
-as every other candidate source.
+The tool's output is candidates, not findings. A candidate goes to manual
+triage and becomes a finding only with a proven PoC, same as every
+other candidate source.
 
 ## Core discipline
 
@@ -29,7 +27,7 @@ as every other candidate source.
   treats noise control as the primary constraint.
 - Three-link evidence or it does not ship. Every candidate carries the
   fix commit that added the guard, the commit that removed it, and the
-  current code at HEAD. That is the kill-before-debug input shape.
+  current code at HEAD. That is the triage input shape.
 
 ## Definitions
 
@@ -37,8 +35,8 @@ as every other candidate source.
   sanitize before a dangerous operation: bounds/length/size checks,
   input validation and normalization, allowlist/denylist checks, auth
   or permission checks, escaping/encoding before a sink, type/range
-  checks, symlink/TOCTOU checks. Guard classes reuse the variant sweep
-  corpus vocabulary where they overlap.
+  checks, symlink/TOCTOU checks. Guard classes reuse common CVE-fix
+  vocabulary where they overlap.
 - **Sink**: the dangerous operation the guard precedes, in the same
   function or the immediate caller chain.
 - **Seed commit**: a commit eligible to originate a tracked guard (see
@@ -109,7 +107,7 @@ For each candidate removal, classify:
   removal or revert intentionally (revert of the fix commit, explicit
   removal language). Closed as a candidate but listed separately in the
   run summary; a deliberate revert of a security fix is worth a human
-  glance, not a pipeline slot.
+  glance, not a candidate slot.
 - **UNKNOWN**: tracking lost the lineage (history rewrite, squash
   across the boundary, file deleted and recreated). Closed, counted.
 
@@ -120,8 +118,8 @@ the same bounded-depth rule Holdout uses) before REGRESSED is allowed.
 
 ### 5. Emit
 
-One row per REGRESSED candidate, siblings-shaped so sibling-triage and
-divergence-triage drain it unchanged, written to
+One row per REGRESSED candidate, siblings-shaped so downstream triage
+tooling can drain it unchanged, written to
 `.clawpatch/archaeology.md` (or `.jsonl`) next to the target's scope
 note:
 
@@ -140,23 +138,23 @@ reads as checked, not skipped.
 
 ## Guard classifier (v1)
 
-Per-language guard shapes for the ecosystems already in the stack:
+Per-language guard shapes for four ecosystems:
 Go, Rust, Python, TypeScript/JavaScript.
 
 The classifier is shape tables, not heuristics soup:
 
 - Rejection shapes per language (early return / raise / revert / error
   propagation under a new condition).
-- Known validation and sanitizer call families per ecosystem (the
-  sweep corpus's verified fixes are the training set: every verified
-  rule's fix diff contains at least one real guard in its final form,
-  which gives the classifier grounded examples from day one).
+- Known validation and sanitizer call families per ecosystem (verified
+  CVE fix diffs are the training set: every verified fix diff contains
+  at least one real guard in its final form, which gives the classifier
+  grounded examples from day one).
 - A shape must sit on the data or control path to a catalogued sink in
   the same function, or it is not a guard for this tool's purposes.
 
 Anything the shape tables cannot classify is not extracted. Precision
 over recall, explicitly: a missed guard costs coverage; a noisy
-candidate queue costs trust in every candidate the pipeline drains.
+candidate queue costs trust in every candidate the tool emits.
 
 ## Validation gate
 
@@ -179,7 +177,7 @@ known-answer test:
 - Input: a local clone of the target repo; advisory fix-commit lists
   when the target has published GHSAs.
 - Output: `.clawpatch/archaeology.md` candidates file per target, plus
-  run counts. Candidates flow to kill-before-debug unchanged.
+  run counts. Candidates flow to manual triage unchanged.
 - Chains with Holdout: Holdout ranks currently unguarded sites by
   consensus; archaeology explains how a specific site lost its guard.
   A site that is both a Holdout outlier and an archaeology REGRESSED
@@ -196,12 +194,12 @@ known-answer test:
 - Non-source defenses: config flags, infrastructure rules, WAF rules.
 - Merge-conflict resolution analysis beyond the removal classification
   above.
-- Automated PoC generation or submission. Candidates only; the
-  pipeline's existing gates decide what pays.
+- Automated PoC generation or submission. Candidates only; human
+  triage decides what is real.
 
 ## Build notes
 
-- Language: Python, matching dyetrace and the sweep pipeline.
+- Language: Python.
 - Git access via subprocessed git commands (log, show, log -S, blame)
   on a local clone; no GitHub API dependency for the core run.
 - Deterministic output: stable sort by removal commit date then sink

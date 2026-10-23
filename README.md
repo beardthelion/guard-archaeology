@@ -42,6 +42,6 @@ Auto-read files under `<repo-root>/.clawpatch/` are realpath-confined to the tar
 
 ## Verdicts
 
-Every tracked guard closes as exactly one of: INTACT (present at the boundary, counted, never reported), REGRESSED (reported), RELOCATED, REMOVED-WITH-SINK, DELIBERATE, or UNKNOWN. Rows are candidates for kill-before-debug drain, not findings.
+Every tracked guard closes as exactly one of: INTACT (present at the boundary, counted, never reported), REGRESSED (reported), RELOCATED, REMOVED-WITH-SINK, DELIBERATE, or UNKNOWN. Rows are candidates for manual triage, not findings.
 
 Candidate rows are runtime-only: guards whose sink lives on a test/fixture path are classified but never emitted. Reachability counts framework dispatch registration (`add_route`, `@app.route`, `router.get`, `HandleFunc`, and similar bindings) as a caller edge, so a registered handler can prove out to REGRESSED; bindings the shape tables do not cover stay UNKNOWN.
