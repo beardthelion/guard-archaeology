@@ -1,6 +1,46 @@
 # guard-archaeology
 
-Finds security guards a codebase added and later silently lost. Spec-first; see SPEC.md.
+Walks a repository's git history to find security guards that were added, usually by a fix, and later removed while the dangerous operation they protected is still there. Each candidate comes with three links of evidence: the commit that added the guard, the commit that removed it, and the unguarded code as it stands now.
+
+Candidates, not findings. Every row needs manual triage.
+
+## Why
+
+Fix regressions are a real, recurring bug class: a bounds check, path check or auth check lands in a security fix, then a refactor or rewrite drops it. Patch history tells you what was fixed, not what quietly unfixed itself. guard-archaeology seeds from fix commits, tracks each guard forward with `git log -G` pickaxe searches over the file's rename lineage, and classifies what happened to it. It is deterministic: no model judgment in the verdict path, and a weak evidence chain closes quietly instead of being reported.
+
+It reads `.py`, `.go`, `.rs`, `.ts` and `.js` files. A statement only counts as a guard when a catalogued sink (filesystem, process, network, parse or similar operation) is reachable after it in the same function, an immediate same-file callee, or an immediate same-file caller.
+
+## Install
+
+Python 3.10 or newer, no runtime dependencies. Needs `git` on PATH.
+
+```bash
+git clone https://github.com/beardthelion/guard-archaeology
+cd guard-archaeology
+pip install -e '.[dev]'
+archaeology --help
+```
+
+## Example
+
+A three-commit repo: a path-traversal fix adds `if ".." in name: raise`, and a later "simplify" commit removes it.
+
+```
+$ archaeology ./demo --out out.jsonl
+seeds=1 tracked=1 intact=0 regressed=1 relocated=0 removed_with_sink=0 deliberate=0 unknown=0
+```
+
+The candidate row (trimmed):
+
+```json
+{"type": "candidate", "id": "archaeology-allowlist-c8e8d71d6a",
+ "sink": {"path": "app.py", "function": "serve", "line": 3, "operation": "os.path.join("},
+ "missing_guard": {"family": "allowlist", "shape": "conditional-rejection",
+                   "raw_text": "    if \"..\" in name:\n        raise ValueError(\"bad path\")"},
+ "seed": {"sha": "61ac34f9...", "advisory": null},
+ "removal": {"sha": "45306714...", "subject": "simplify serve"},
+ "exposure": "unknown", "holdout": null}
+```
 
 ## Usage
 
@@ -45,3 +85,28 @@ Auto-read files under `<repo-root>/.clawpatch/` are realpath-confined to the tar
 Every tracked guard closes as exactly one of: INTACT (present at the boundary, counted, never reported), REGRESSED (reported), RELOCATED, REMOVED-WITH-SINK, DELIBERATE, or UNKNOWN. Rows are candidates for manual triage, not findings.
 
 Candidate rows are runtime-only: guards whose sink lives on a test/fixture path are classified but never emitted. Reachability counts framework dispatch registration (`add_route`, `@app.route`, `router.get`, `HandleFunc`, and similar bindings) as a caller edge, so a registered handler can prove out to REGRESSED; bindings the shape tables do not cover stay UNKNOWN.
+
+## Tests
+
+```bash
+pytest -q
+```
+
+[docs/gate-results.md](docs/gate-results.md) and [VERDICT.md](VERDICT.md) record the known-answer gate on a public project (a historic static-file path guard that was removed and later re-fixed, found as REGRESSED with the right seed and removal commits, with a clean negative control) and runs on two large public Python projects.
+
+## Limitations
+
+- Low yield so far: on the two large real projects in VERDICT.md, every seed mode produced zero REGRESSED rows. Hand checks of the near misses showed relocations and renames, not silent losses.
+- Language handling is lexical (pattern tables per language), not a full parser. Bindings and sinks the tables do not cover end as UNKNOWN.
+- Message-mode seeding on very large histories runs tens of minutes in one process; use `--max-seeds` or seeds files.
+- Candidate rows do not include the evidence for why caller coverage was judged absent.
+- `siblings` is always empty in v1.
+
+Design: [SPEC.md](SPEC.md).
+
+## Related tools
+
+- [holdout](https://github.com/beardthelion/holdout): finds sites that break a project's current guard consensus; its rows are cross-referenced here when present
+- [release-surface-diff](https://github.com/beardthelion/release-surface-diff): flags guards added or removed between two release tags
+- [cve-variant-sweep](https://github.com/beardthelion/cve-variant-sweep): turns guard-adding fixes into Semgrep rules for variant hunting
+- [autocatalytic-harness](https://github.com/beardthelion/autocatalytic-harness): the audit harness that owns the `.clawpatch/` directory this tool reads and writes
