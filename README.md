@@ -110,3 +110,7 @@ Design: [SPEC.md](SPEC.md).
 - [release-surface-diff](https://github.com/beardthelion/release-surface-diff): flags guards added or removed between two release tags
 - [cve-variant-sweep](https://github.com/beardthelion/cve-variant-sweep): turns guard-adding fixes into Semgrep rules for variant hunting
 - [autocatalytic-harness](https://github.com/beardthelion/autocatalytic-harness): the audit harness that owns the `.clawpatch/` directory this tool reads and writes
+
+## License
+
+MIT. See [LICENSE](LICENSE).
